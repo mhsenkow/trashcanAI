@@ -2,7 +2,9 @@
 
 import dynamic from "next/dynamic";
 import { useGeometry } from "@/lib/useGeometry";
+import { MengerLoader } from "./MengerLoader";
 import { Sidebar } from "./Sidebar";
+import { ViewCube } from "./ViewControls";
 
 // The Canvas must never render on the server (no WebGL there).
 const Viewport = dynamic(() => import("./Viewport"), {
@@ -13,16 +15,17 @@ const Viewport = dynamic(() => import("./Viewport"), {
 export default function Studio() {
   const geo = useGeometry();
   const firstLoad = geo.status === "loading" && !geo.geometry;
+  const updating = geo.paramsPending && geo.geometry !== null;
 
   return (
     <div className="h-full w-full flex bg-[#0a0b0d]">
       {/* Viewport — ~70% */}
       <div className="relative flex-1 min-w-0">
-        <Viewport geometry={geo.geometry} />
+        <Viewport geometry={geo.geometry} generation={geo.generation} />
 
         {/* Top status bar */}
-        <div className="pointer-events-none absolute inset-x-0 top-0 flex items-start justify-between p-4">
-          <div className="flex items-center gap-2 rounded-md bg-black/40 backdrop-blur px-2.5 py-1.5 border border-white/5">
+        <div className="pointer-events-none absolute inset-x-0 top-0 flex items-start justify-between gap-3 p-4">
+          <div className="flex items-center gap-2 rounded-md bg-black/40 backdrop-blur px-2.5 py-1.5 border border-white/5 w-fit">
             <span
               className={`w-1.5 h-1.5 rounded-full ${
                 geo.status === "error"
@@ -35,15 +38,27 @@ export default function Studio() {
             <span className="text-[11px] font-mono text-zinc-300">
               {geo.status === "error"
                 ? "ENGINE ERROR"
-                : geo.status === "loading"
-                  ? "GENERATING"
+                : geo.paramsPending
+                  ? "UPDATING"
                   : "WATERTIGHT"}
             </span>
           </div>
-          <div className="text-[11px] font-mono text-zinc-600">
+          <span className="text-[11px] font-mono text-zinc-600 pt-1 shrink-0">
             drag · orbit&nbsp;&nbsp;scroll · zoom
-          </div>
+          </span>
         </div>
+
+        <div className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2">
+          <ViewCube />
+        </div>
+
+        {updating && (
+          <div className="pointer-events-none absolute inset-0 flex items-end justify-center pb-8">
+            <div className="rounded-md bg-black/50 backdrop-blur px-3 py-1.5 border border-white/10 text-[11px] font-mono text-zinc-300">
+              Applying parameters…
+            </div>
+          </div>
+        )}
 
         {firstLoad && <ViewportSkeleton label="Initializing geometry engine…" />}
 
@@ -68,10 +83,7 @@ export default function Studio() {
 function ViewportSkeleton({ label }: { label: string }) {
   return (
     <div className="absolute inset-0 flex items-center justify-center bg-[#0a0b0d]">
-      <div className="flex flex-col items-center gap-3">
-        <div className="w-7 h-7 rounded-full border-2 border-zinc-700 border-t-[var(--accent)] animate-spin" />
-        <p className="text-xs font-mono text-zinc-500">{label}</p>
-      </div>
+      <MengerLoader label={label} />
     </div>
   );
 }

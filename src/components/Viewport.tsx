@@ -6,8 +6,8 @@
 // grooves and cavity does most of the realism work. Z-up geometry is rotated
 // into the scene's Y-up world so the part rests on the "build plate" grid.
 
-import { useEffect, useMemo } from "react";
-import { Canvas } from "@react-three/fiber";
+import { useEffect, useMemo, useRef } from "react";
+import { Canvas, useThree } from "@react-three/fiber";
 import {
   ContactShadows,
   Environment,
@@ -24,6 +24,8 @@ import {
 } from "@react-three/postprocessing";
 import { ToneMappingMode } from "postprocessing";
 import { partToBufferGeometry } from "@/lib/exportStl";
+import { cameraForPreset } from "@/lib/viewPresets";
+import { useViewStore } from "@/lib/viewStore";
 import type { GeneratedGeometry, GeneratedPart } from "@/lib/types";
 
 function minZ(positions: Float32Array): number {
@@ -73,10 +75,46 @@ function StudioEnvironment() {
   );
 }
 
+type MinimalControls = {
+  target: { set: (x: number, y: number, z: number) => void };
+  update: () => void;
+} | null;
+
+/** Applies iso framing or a named orthographic preset when requested from the UI. */
+function CameraRig({ maxDim, bodyHeight }: { maxDim: number; bodyHeight: number }) {
+  const frameNonce = useViewStore((s) => s.frameNonce);
+  const viewNonce = useViewStore((s) => s.viewNonce);
+  const activePreset = useViewStore((s) => s.activePreset);
+  const camera = useThree((s) => s.camera);
+  const controls = useThree((s) => s.controls) as MinimalControls;
+  const dims = useRef({ maxDim, bodyHeight });
+  useEffect(() => {
+    dims.current = { maxDim, bodyHeight };
+  }, [maxDim, bodyHeight]);
+
+  useEffect(() => {
+    const { maxDim: d, bodyHeight: h } = dims.current;
+    const preset = activePreset ?? "iso";
+    const { position, target } = cameraForPreset(preset, d, h);
+    camera.position.set(...position);
+    camera.near = 1;
+    camera.far = d * 40;
+    camera.updateProjectionMatrix();
+    if (controls) {
+      controls.target.set(...target);
+      controls.update();
+    }
+  }, [frameNonce, viewNonce, activePreset, camera, controls]);
+
+  return null;
+}
+
 export default function Viewport({
   geometry,
+  generation = 0,
 }: {
   geometry: GeneratedGeometry | null;
+  generation?: number;
 }) {
   const bodyHeight = geometry?.stats.outerDims[2] ?? 60;
   const maxDim = geometry
@@ -87,6 +125,7 @@ export default function Viewport({
   const lidZOffset = geometry?.lid
     ? bodyHeight + visibleGap - minZ(geometry.lid.positions)
     : 0;
+  const clearActivePreset = useViewStore((s) => s.clearActivePreset);
 
   return (
     <Canvas
@@ -94,10 +133,10 @@ export default function Viewport({
       shadows
       dpr={[1, 2]}
       gl={{ antialias: false, preserveDrawingBuffer: false }}
-      camera={{ position: [camDist, camDist * 0.75, camDist], fov: 40, near: 1, far: maxDim * 40 }}
+      camera={{ position: [camDist, camDist * 0.78, camDist], fov: 40, near: 1, far: maxDim * 40 }}
     >
       <color attach="background" args={["#0a0b0d"]} />
-      <fog attach="fog" args={["#0a0b0d", camDist * 1.7, camDist * 4.2]} />
+      <fog attach="fog" args={[0x0a0b0d, camDist * 1.7, camDist * 4.2]} />
 
       <hemisphereLight intensity={0.25} groundColor="#0a0b0d" color="#cdd6e3" />
       <directionalLight position={[40, 80, 30]} intensity={1.1} color="#ffffff" />
@@ -105,7 +144,7 @@ export default function Viewport({
 
       <StudioEnvironment />
 
-      <group rotation={[-Math.PI / 2, 0, 0]}>
+      <group key={generation} rotation={[-Math.PI / 2, 0, 0]}>
         {geometry && <PartMesh part={geometry.body} />}
         {geometry?.lid && <PartMesh part={geometry.lid} zOffset={lidZOffset} accent />}
       </group>
@@ -139,10 +178,13 @@ export default function Viewport({
         enableDamping
         dampingFactor={0.08}
         target={[0, bodyHeight * 0.42, 0]}
-        minDistance={maxDim * 0.6}
-        maxDistance={maxDim * 8}
-        maxPolarAngle={Math.PI / 1.9}
+        minDistance={maxDim * 0.35}
+        maxDistance={maxDim * 9}
+        minPolarAngle={0.05}
+        maxPolarAngle={Math.PI - 0.05}
+        onStart={() => clearActivePreset()}
       />
+      <CameraRig maxDim={maxDim} bodyHeight={bodyHeight} />
 
       <EffectComposer multisampling={4} enableNormalPass>
         <N8AO aoRadius={5} distanceFalloff={1} intensity={2.6} quality="medium" color="black" />

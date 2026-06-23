@@ -5,15 +5,22 @@
 // the buffers in a THREE.Mesh for the exporter.
 
 import * as THREE from "three";
+import { mergeVertices, toCreasedNormals } from "three-stdlib";
 import { STLExporter } from "three-stdlib";
 import type { GeneratedPart } from "./types";
 
 export function partToBufferGeometry(part: GeneratedPart): THREE.BufferGeometry {
+  const positions = new Float32Array(part.positions);
+  const indices = new Uint32Array(part.indices);
   const geom = new THREE.BufferGeometry();
-  geom.setAttribute("position", new THREE.BufferAttribute(part.positions, 3));
-  geom.setIndex(new THREE.BufferAttribute(part.indices, 1));
-  geom.computeVertexNormals();
-  return geom;
+  geom.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+  geom.setIndex(new THREE.BufferAttribute(indices, 1));
+  // Manifold emits split verts per triangle; weld + creased normals for clean shading.
+  const welded = mergeVertices(geom, 1e-4);
+  geom.dispose();
+  const creased = toCreasedNormals(welded, Math.PI / 4);
+  welded.dispose();
+  return creased;
 }
 
 export function exportPartToStl(part: GeneratedPart, filename: string): void {

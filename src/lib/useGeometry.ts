@@ -6,7 +6,7 @@
 // worker can't be created (e.g. unusual bundler/runtime environments).
 
 import { useEffect, useRef, useState } from "react";
-import { selectParams, useParamStore } from "./store";
+import { paramsEqual, selectParams, useParamStore } from "./store";
 import type { GeneratedGeometry, ReceptacleParams } from "./types";
 import type {
   WorkerRequest,
@@ -19,15 +19,23 @@ export interface GeometryState {
   geometry: GeneratedGeometry | null;
   status: GenStatus;
   error: string | null;
+  /** Params used for the mesh currently shown (null before first successful gen). */
+  builtParams: ReceptacleParams | null;
+  /** Monotonic id — bump on each successful generation so the viewport remounts. */
+  generation: number;
+  /** True when sliders differ from the mesh on screen (debounce / worker in flight). */
+  paramsPending: boolean;
 }
 
-const DEBOUNCE_MS = 90;
+const DEBOUNCE_MS = 120;
 
 export function useGeometry(): GeometryState {
-  const [state, setState] = useState<GeometryState>({
+  const [state, setState] = useState<Omit<GeometryState, "paramsPending">>({
     geometry: null,
     status: "loading",
     error: null,
+    builtParams: null,
+    generation: 0,
   });
 
   const workerRef = useRef<Worker | null>(null);
@@ -40,8 +48,21 @@ export function useGeometry(): GeometryState {
   const fbBusy = useRef(false);
   const fbPending = useRef<ReceptacleParams | null>(null);
 
+  const [workerBusy, setWorkerBusy] = useState(false);
+
   useEffect(() => {
     let disposed = false;
+
+    function applySuccess(geometry: GeneratedGeometry, params: ReceptacleParams) {
+      if (disposed) return;
+      setState((s) => ({
+        geometry,
+        status: "ready",
+        error: null,
+        builtParams: params,
+        generation: s.generation + 1,
+      }));
+    }
 
     async function runFallback(params: ReceptacleParams) {
       if (fbBusy.current) {
@@ -56,7 +77,7 @@ export function useGeometry(): GeometryState {
         ]);
         const wasm = await getManifold();
         const geometry = generate(wasm, params);
-        if (!disposed) setState({ geometry, status: "ready", error: null });
+        applySuccess(geometry, params);
       } catch (e) {
         if (!disposed)
           setState((s) => ({
@@ -66,6 +87,7 @@ export function useGeometry(): GeometryState {
           }));
       } finally {
         fbBusy.current = false;
+        setWorkerBusy(false);
         if (fbPending.current) {
           const next = fbPending.current;
           fbPending.current = null;
@@ -76,11 +98,13 @@ export function useGeometry(): GeometryState {
 
     function dispatch(params: ReceptacleParams) {
       if (fallback.current) {
+        setWorkerBusy(true);
         void runFallback(params);
         return;
       }
       const worker = workerRef.current;
       if (!worker) return;
+      setWorkerBusy(true);
       reqId.current += 1;
       latestId.current = reqId.current;
       const msg: WorkerRequest = { id: reqId.current, params };
@@ -88,9 +112,44 @@ export function useGeometry(): GeometryState {
     }
 
     function schedule(params: ReceptacleParams) {
-      setState((s) => (s.status === "error" ? s : { ...s, status: "loading" }));
       if (timer.current) clearTimeout(timer.current);
-      timer.current = setTimeout(() => dispatch(params), DEBOUNCE_MS);
+      timer.current = setTimeout(() => {
+        setState((s) => ({ ...s, error: null }));
+        dispatch(params);
+      }, DEBOUNCE_MS);
+    }
+
+    function spawnWorker(): Worker | null {
+      try {
+        const worker = new Worker(
+          new URL("./geometry/geometry.worker.ts", import.meta.url),
+          { type: "module" },
+        );
+        worker.onmessage = (ev: MessageEvent<WorkerResponse>) => {
+          const data = ev.data;
+          if (data.id !== latestId.current) return;
+          if (data.ok) {
+            setWorkerBusy(false);
+            applySuccess(data.geometry, data.params);
+          } else {
+            setWorkerBusy(false);
+            console.warn("[useGeometry] generation failed:", data.error);
+            setState((s) => ({
+              ...s,
+              status: s.geometry ? "ready" : "error",
+              error: data.error,
+            }));
+            worker.terminate();
+            workerRef.current = spawnWorker();
+          }
+        };
+        worker.onerror = (e) => switchToFallback(e.message || "worker error");
+        worker.onmessageerror = () => switchToFallback("message deserialization error");
+        return worker;
+      } catch (e) {
+        switchToFallback(e instanceof Error ? e.message : String(e));
+        return null;
+      }
     }
 
     function switchToFallback(reason: string) {
@@ -102,30 +161,16 @@ export function useGeometry(): GeometryState {
       void runFallback(selectParams(useParamStore.getState()));
     }
 
-    try {
-      const worker = new Worker(
-        new URL("./geometry/geometry.worker.ts", import.meta.url),
-        { type: "module" },
-      );
-      worker.onmessage = (ev: MessageEvent<WorkerResponse>) => {
-        const data = ev.data;
-        if (data.id !== latestId.current) return; // drop superseded results
-        if (data.ok) {
-          setState({ geometry: data.geometry, status: "ready", error: null });
-        } else {
-          setState((s) => ({ ...s, status: "error", error: data.error }));
-        }
-      };
-      worker.onerror = (e) => switchToFallback(e.message || "worker error");
-      worker.onmessageerror = () => switchToFallback("message deserialization error");
-      workerRef.current = worker;
-    } catch (e) {
-      switchToFallback(e instanceof Error ? e.message : String(e));
-    }
+    workerRef.current = spawnWorker();
 
-    // Kick off the first generation and react to every subsequent change.
     schedule(selectParams(useParamStore.getState()));
-    const unsub = useParamStore.subscribe((s) => schedule(selectParams(s)));
+    let lastScheduled = selectParams(useParamStore.getState());
+    const unsub = useParamStore.subscribe((s) => {
+      const next = selectParams(s);
+      if (paramsEqual(lastScheduled, next)) return;
+      lastScheduled = next;
+      schedule(next);
+    });
 
     return () => {
       disposed = true;
@@ -136,5 +181,7 @@ export function useGeometry(): GeometryState {
     };
   }, []);
 
-  return state;
+  const paramsPending = workerBusy || state.status === "loading";
+
+  return { ...state, paramsPending };
 }

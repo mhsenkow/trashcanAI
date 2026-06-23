@@ -27,15 +27,21 @@ Other scripts: `pnpm typecheck`, `pnpm lint`, `pnpm serve` (dev on a fixed port
 
 ## Features
 
-- **Dimensional controls** — length, width, height, corner radius, wall thickness.
-- **Three surfacing archetypes:**
-  - **Aero-Ribbing** — vertical or horizontal structural ridges.
-  - **Micro-Knurling** — a fine diamond grid that masks layer lines and adds grip.
-  - **Procedural Noise** — 3D simplex displacement baked in as a consistent "fuzzy skin".
+- **Dimensional controls** — length, width, height, corner radius, wall + floor thickness.
+- **Seven surfacing archetypes** — Aero-Ribbing (vertical/horizontal), Micro-Knurling
+  (diamond grid), Procedural Noise (multi-octave fBm fuzzy skin), Hex (honeycomb
+  bosses), Cells (Voronoi pebbling), Waves (flowing ripples), and Weave (basket).
+- **Creative modifiers** — Sharpness (soft ↔ crisp feature profile) and Distortion
+  (noise domain-warp that makes any pattern flow organically).
+- **WeaverBird-style subdivision smoothing** — a 0–6 slider; `smoothOut` (G1 tangents)
+  + `refine` round facets into organic surfaces and multiply the polygon count (capped
+  to a triangle budget), while keeping the top rim / flange / base edges crisp.
 - **Mounting flange** — optional outward rim at the top so the body hangs in a
   cutout (drop-in bin) instead of falling through; width/thickness controls, and
   the minimum cutout size is reported live.
-- **Friction-fit lid** — auto-generated plate (covers the flange) + plug ring sized to the cavity.
+- **Friction-fit lid** — auto-generated plate (covers the flange) + plug ring, with
+  tunable press-fit clearance and lip height (0 = flat plate that rests on the rim).
+- **Reframe** the camera any time the part drifts out of view.
 - **Binary STL export** for body and lid (millimetres, watertight).
 - Live stats: watertight check, outer bounds, drop-in cutout, triangle count, generation time.
 

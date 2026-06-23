@@ -8,6 +8,7 @@ import {
 } from "@/lib/types";
 import type { GeometryState } from "@/lib/useGeometry";
 import { exportPartToStl } from "@/lib/exportStl";
+import { PresetBar } from "./PresetBar";
 import { Slider } from "./ui/Slider";
 import { Segmented } from "./ui/Segmented";
 
@@ -32,16 +33,23 @@ const SURFACING_OPTIONS = [
   { value: "smooth" as const, label: "Smooth", hint: "No surface treatment" },
   { value: "ribbing" as const, label: "Aero-Rib", hint: "Structural ridges — rigidity + dashboard aesthetic" },
   { value: "knurling" as const, label: "Knurl", hint: "Diamond micro-grid — masks layer lines, adds grip" },
-  { value: "noise" as const, label: "Noise", hint: "Simplex fuzzy-skin baked into the mesh" },
+  { value: "noise" as const, label: "Noise", hint: "Multi-octave simplex fuzzy-skin baked into the mesh" },
+  { value: "hex" as const, label: "Hex", hint: "Hexagonal boss lattice — honeycomb" },
+  { value: "cells" as const, label: "Cells", hint: "Voronoi pebbling — organic cellular" },
+  { value: "waves" as const, label: "Waves", hint: "Flowing frequency-modulated ripples" },
+  { value: "weave" as const, label: "Weave", hint: "Basket weave — over/under threads" },
 ];
 
-export function Sidebar({ geometry, status, error }: GeometryState) {
+const pct = (v: number) => `${Math.round(v * 100)}%`;
+
+export function Sidebar({ geometry, status, error, builtParams, paramsPending }: GeometryState) {
   const s = useParamStore();
   const radiusMax = Math.min(PARAM_LIMITS.cornerRadius.max, Math.min(s.length, s.width) / 2);
+  const smooth = s.surfacing === "smooth";
 
   const stats = geometry?.stats;
   const ampClamped =
-    stats && s.surfacing !== "smooth" && stats.effectiveAmplitude < s.amplitude - 1e-4;
+    stats && !smooth && stats.effectiveAmplitude < s.amplitude - 1e-4;
 
   function exportBody() {
     if (!geometry) return;
@@ -68,6 +76,9 @@ export function Sidebar({ geometry, status, error }: GeometryState) {
         <p className="mt-1 text-[11px] text-zinc-500 pl-4">
           Algorithmic surfacing · production-ready STL
         </p>
+        <div className="mt-3 pl-4 pr-1">
+          <PresetBar />
+        </div>
       </div>
 
       {/* Dimensions */}
@@ -84,6 +95,9 @@ export function Sidebar({ geometry, status, error }: GeometryState) {
           onChange={(v) => s.setParam("cornerRadius", v)}
         />
         <Slider label="Wall Thickness" value={s.wallThickness} {...PARAM_LIMITS.wallThickness} onChange={(v) => s.setParam("wallThickness", v)} />
+        <Slider label="Floor Thickness" value={s.floorThickness} {...PARAM_LIMITS.floorThickness} onChange={(v) => s.setParam("floorThickness", v)} />
+        <Slider label="Wall Draft" value={s.wallDraft} {...PARAM_LIMITS.wallDraft} unit="°" onChange={(v) => s.setParam("wallDraft", v)} />
+        <Slider label="Bottom Radius" value={s.bottomFillet} {...PARAM_LIMITS.bottomFillet} onChange={(v) => s.setParam("bottomFillet", v)} />
       </Section>
 
       {/* Mounting Flange */}
@@ -112,7 +126,7 @@ export function Sidebar({ geometry, status, error }: GeometryState) {
         <Segmented
           value={s.surfacing}
           options={SURFACING_OPTIONS}
-          onChange={(v: SurfacingType) => s.setParam("surfacing", v)}
+          onChange={(v: SurfacingType) => s.applySurfacing(v)}
           columns={2}
         />
         {s.surfacing === "ribbing" && (
@@ -130,21 +144,55 @@ export function Sidebar({ geometry, status, error }: GeometryState) {
           label={s.surfacing === "noise" ? "Displacement" : "Depth"}
           value={s.amplitude}
           {...PARAM_LIMITS.amplitude}
-          disabled={s.surfacing === "smooth"}
+          disabled={smooth}
           onChange={(v) => s.setParam("amplitude", v)}
         />
         <Slider
           label={s.surfacing === "noise" ? "Noise Scale" : "Pitch"}
           value={s.featureScale}
           {...PARAM_LIMITS.featureScale}
-          disabled={s.surfacing === "smooth"}
+          disabled={smooth}
           onChange={(v) => s.setParam("featureScale", v)}
+        />
+        <Slider
+          label="Sharpness"
+          value={s.sharpness}
+          {...PARAM_LIMITS.sharpness}
+          disabled={smooth}
+          format={pct}
+          onChange={(v) => s.setParam("sharpness", v)}
+        />
+        <Slider
+          label="Distortion"
+          value={s.distortion}
+          {...PARAM_LIMITS.distortion}
+          disabled={smooth}
+          format={pct}
+          onChange={(v) => s.setParam("distortion", v)}
         />
         {ampClamped && (
           <p className="text-[10px] leading-snug text-amber-400/90">
-            Depth limited to {stats!.effectiveAmplitude.toFixed(2)}mm so ribs stay valid at this pitch.
+            Depth limited to {stats!.effectiveAmplitude.toFixed(2)}mm so features stay valid at this pitch.
           </p>
         )}
+      </Section>
+
+      {/* Mesh smoothing */}
+      <Section title="Mesh">
+        <Slider
+          label="Subdivision"
+          value={s.smoothing}
+          {...PARAM_LIMITS.smoothing}
+          unit=""
+          format={(v) => (v === 0 ? "Off" : `${v}×`)}
+          onChange={(v) => s.setParam("smoothing", v)}
+        />
+        <p className="text-[10px] text-zinc-600 leading-snug">
+          G1 smoothing on the exterior shell before hollowing. Watch{" "}
+          <span className="text-zinc-400">Params → In sync</span> and{" "}
+          <span className="text-zinc-400">Outer / Triangles</span> to confirm
+          updates landed (generation takes ~1–4 s).
+        </p>
       </Section>
 
       {/* Lid */}
@@ -158,17 +206,53 @@ export function Sidebar({ geometry, status, error }: GeometryState) {
           ]}
           onChange={(v) => s.setParam("includeLid", v === "on")}
         />
+        <Slider
+          label="Fit Clearance"
+          value={s.lidClearance}
+          {...PARAM_LIMITS.lidClearance}
+          disabled={!s.includeLid}
+          onChange={(v) => s.setParam("lidClearance", v)}
+        />
+        <Slider
+          label="Lip Height"
+          value={s.lidLipHeight}
+          {...PARAM_LIMITS.lidLipHeight}
+          disabled={!s.includeLid}
+          onChange={(v) => s.setParam("lidLipHeight", v)}
+        />
+        <p className="text-[10px] text-zinc-600 leading-snug">
+          Clearance tunes the press-fit for your printer. Lip height sets the
+          plug depth — 0 makes a flat plate that rests on the rim.
+        </p>
       </Section>
 
       {/* Output / stats / export */}
       <Section title="Output">
         <div className="rounded-lg bg-zinc-900/60 border border-zinc-800 p-3 space-y-2 font-mono text-[11px]">
-          <StatRow label="Status" value={statusLabel(status, error)} tone={status === "error" ? "bad" : status === "loading" ? "muted" : "good"} />
+          <StatRow label="Status" value={statusLabel(status, error, paramsPending)} tone={status === "error" ? "bad" : paramsPending ? "muted" : "good"} />
+          <StatRow
+            label="Params"
+            value={
+              !builtParams
+                ? "—"
+                : paramsPending
+                  ? "Updating…"
+                  : "In sync"
+            }
+            tone={paramsPending ? "muted" : "good"}
+          />
           <StatRow
             label="Watertight"
             value={stats ? (stats.watertight ? "YES" : "NO") : "—"}
             tone={stats?.watertight ? "good" : "muted"}
           />
+          {stats && stats.nakedEdges > 0 && (
+            <StatRow
+              label="Open edges"
+              value={String(stats.nakedEdges)}
+              tone="muted"
+            />
+          )}
           <StatRow
             label="Outer (mm)"
             value={stats ? stats.outerDims.map((d) => d.toFixed(1)).join(" × ") : "—"}
@@ -222,14 +306,18 @@ export function Sidebar({ geometry, status, error }: GeometryState) {
   );
 }
 
-function statusLabel(status: GeometryState["status"], error: string | null): string {
+function statusLabel(
+  status: GeometryState["status"],
+  error: string | null,
+  paramsPending: boolean,
+): string {
   if (status === "error") return error ? truncate(error, 22) : "ERROR";
-  if (status === "loading") return "GENERATING…";
+  if (paramsPending) return "GENERATING…";
   return "READY";
 }
 
-function truncate(s: string, n: number): string {
-  return s.length > n ? s.slice(0, n - 1) + "…" : s;
+function truncate(str: string, n: number): string {
+  return str.length > n ? str.slice(0, n - 1) + "…" : str;
 }
 
 function StatRow({

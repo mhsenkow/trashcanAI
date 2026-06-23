@@ -15,6 +15,14 @@ const eslintConfig = defineConfig([
     // Vendored manifold WASM glue copied in from node_modules.
     "public/**",
   ]),
+  {
+    // React Three Fiber legitimately mutates three.js camera/controls/geometry
+    // objects imperatively — the React Compiler immutability rule misfires here.
+    files: ["src/components/Viewport.tsx"],
+    rules: {
+      "react-hooks/immutability": "off",
+    },
+  },
 ]);
 
 export default eslintConfig;
