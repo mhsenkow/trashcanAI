@@ -1,0 +1,44 @@
+{
+  "name": "receptacle-gen",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "predev": "node scripts/copy-manifold.mjs",
+    "dev": "next dev --webpack",
+    "prebuild": "node scripts/copy-manifold.mjs",
+    "build": "next build --webpack",
+    "start": "next start",
+    "lint": "eslint",
+    "typecheck": "tsc --noEmit",
+    "serve": "node scripts/copy-manifold.mjs && next dev --webpack --port 3011"
+  },
+  "dependencies": {
+    "@radix-ui/react-slider": "^1.4.1",
+    "@radix-ui/react-toggle-group": "^1.1.13",
+    "@react-three/drei": "^10.7.7",
+    "@react-three/fiber": "^9.6.1",
+    "@react-three/postprocessing": "^3.0.4",
+    "clsx": "^2.1.1",
+    "manifold-3d": "^3.5.1",
+    "n8ao": "^1.10.2",
+    "next": "16.2.9",
+    "postprocessing": "^6.39.1",
+    "react": "19.2.4",
+    "react-dom": "19.2.4",
+    "simplex-noise": "^4.0.3",
+    "three": "^0.184.0",
+    "three-stdlib": "^2.36.1",
+    "zustand": "^5.0.14"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4",
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "@types/three": "^0.184.1",
+    "eslint": "^9",
+    "eslint-config-next": "16.2.9",
+    "tailwindcss": "^4",
+    "typescript": "^5"
+  }
+}
