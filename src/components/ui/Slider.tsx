@@ -1,7 +1,7 @@
 "use client";
 
 import * as RSlider from "@radix-ui/react-slider";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 interface SliderProps {
   label: string;
@@ -46,13 +46,35 @@ export function Slider({
     setDraft(value.toFixed(dec));
   }, [value, dec]);
 
+  const commitTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(
+    () => () => {
+      if (commitTimer.current) clearTimeout(commitTimer.current);
+    },
+    [],
+  );
+
   const commitDraft = () => {
+    if (commitTimer.current) clearTimeout(commitTimer.current);
     const parsed = Number.parseFloat(draft);
     if (Number.isNaN(parsed)) {
       setDraft(value.toFixed(dec));
       return;
     }
     onChange(clampStep(parsed, min, max, step));
+  };
+
+  // Apply a typed value shortly after typing stops, so a precise entry takes
+  // effect without forcing the user to blur or press Enter.
+  const handleType = (raw: string) => {
+    setDraft(raw);
+    if (commitTimer.current) clearTimeout(commitTimer.current);
+    const parsed = Number.parseFloat(raw);
+    if (Number.isNaN(parsed)) return;
+    commitTimer.current = setTimeout(
+      () => onChange(clampStep(parsed, min, max, step)),
+      350,
+    );
   };
 
   return (
@@ -68,7 +90,7 @@ export function Slider({
             aria-label={`${label} value`}
             value={draft}
             disabled={disabled}
-            onChange={(e) => setDraft(e.target.value)}
+            onChange={(e) => handleType(e.target.value)}
             onBlur={commitDraft}
             onKeyDown={(e) => {
               if (e.key === "Enter") {

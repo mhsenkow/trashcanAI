@@ -2,9 +2,8 @@
 // `warpBatch`.
 //
 // Two things are applied as displacements along the exterior normal:
-//   1. A profile offset = wall draft (taper) plus a bottom fillet that tucks
-//      inward at the base. Applied to side walls and cap perimeters so the mesh
-//      stays closed.
+//   1. A profile offset = wall draft (taper) eased in over the bottom-radius
+//      band, plus Z curvature that domes the foot without an XY outward step.
 //   2. The algorithmic finish, pushed *outward only* on the exterior wall, faded
 //      to zero in a band near the top/bottom so the rim and base stay clean.
 //
@@ -68,8 +67,12 @@ export interface WarpContext {
   taperBand: number;
   /** tan(draft angle): radial outward offset per mm above this part's base (zMin). */
   draftTan?: number;
-  /** Bottom fillet radius (mm), measured from this part's base (zMin). */
+  /** Bottom fillet radius (mm). */
   bottomFillet?: number;
+  /** Global z that the taper + fillet are measured from (default zMin). Pass the
+   *  same value (0) for both the wall and the cavity so their profiles stay
+   *  concentric and the wall thickness is constant. */
+  profileBaseZ?: number;
 }
 
 const TWO_PI = Math.PI * 2;
@@ -99,33 +102,35 @@ export function makeWarp(cfg: SurfacingConfig, ctx: WarpContext): WarpFn {
   const { halfL, halfW, r, zMin, zMax, taperBand } = ctx;
   const draftTan = ctx.draftTan ?? 0;
   const bottomFillet = ctx.bottomFillet ?? 0;
+  const profileBaseZ = ctx.profileBaseZ ?? zMin;
 
   const hasSurfacing = type !== "smooth" && amplitude > 0;
   const hasProfile = draftTan !== 0 || bottomFillet > 0;
   if (!hasSurfacing && !hasProfile) return () => {};
 
-  // Quarter-round tuck at the base: max inset at zMin, blends to nominal at zMin+r.
-  // Draft taper continues above the fillet band (both are 0 at the junction).
-  // Surfacing stays off through the entire fillet band so ribs cannot bulge past
-  // the tucked base and create a visible seam.
-  const profileOffset = (x: number, y: number, z: number): number => {
-    if (!isShellWallVertex(x, y, z, halfL, halfW, r, zMin, zMax)) return 0;
-    const zb = z - zMin;
-
-    if (bottomFillet > 0 && zb >= 0 && zb <= bottomFillet + WALL_EPS) {
-      const t = bottomFillet - Math.min(zb, bottomFillet);
-      return -(bottomFillet - Math.sqrt(Math.max(0, bottomFillet * bottomFillet - t * t)));
+  // Wall draft eased in from the floor (no XY outward step). Z rounding comes
+  // only from the domed bottom cap — wall verts stay above the plate edge.
+  const profileDisplacement = (
+    x: number,
+    y: number,
+    z: number,
+  ): { dr: number; dz: number } => {
+    if (!isShellWallVertex(x, y, z, halfL, halfW, r, zMin, zMax)) return { dr: 0, dz: 0 };
+    const zg = z - profileBaseZ;
+    const F = bottomFillet;
+    if (F <= 0 || zg >= F) {
+      return { dr: zg * draftTan, dz: 0 };
     }
-
-    if (draftTan !== 0 && zb > bottomFillet + WALL_EPS) {
-      return (zb - bottomFillet) * draftTan;
-    }
-
-    return 0;
+    const theta = (zg / F) * (Math.PI / 2);
+    return { dr: F * draftTan * Math.sin(theta), dz: 0 };
   };
 
-  /** Cap fans leave an interior pole; shrink the flat cap disk with the tucked rim. */
-  const applyBottomCapShrink = (
+  /** Normalized radial distance 0 at centre, ~1 at the flat part of the footprint edge. */
+  const capDist = (x: number, y: number): number =>
+    Math.min(1, Math.hypot(x / Math.max(halfL, 0.1), y / Math.max(halfW, 0.1)));
+
+  /** Dome the flat bottom cap; rim stays at zMin so the wall foot meets flush. */
+  const applyBottomCapDome = (
     verts: Float64Array,
     o: number,
     x: number,
@@ -137,10 +142,11 @@ export function makeWarp(cfg: SurfacingConfig, ctx: WarpContext): WarpFn {
     const ax = halfL - cr;
     const ay = halfW - cr;
     if (Math.abs(x) >= ax - WALL_EPS || Math.abs(y) >= ay - WALL_EPS) return false;
-    const sx = Math.max(0.05, (halfL - bottomFillet) / halfL);
-    const sy = Math.max(0.05, (halfW - bottomFillet) / halfW);
-    verts[o] = x * sx;
-    verts[o + 1] = y * sy;
+
+    const dist = capDist(x, y);
+    const domeDip = bottomFillet * (1 - Math.sqrt(Math.max(0, 1 - dist * dist)));
+    const interiorBowl = zMin > profileBaseZ + 0.5;
+    verts[o + 2] = (interiorBowl ? zMin : profileBaseZ) - domeDip;
     return true;
   };
 
@@ -152,12 +158,13 @@ export function makeWarp(cfg: SurfacingConfig, ctx: WarpContext): WarpFn {
         const x = verts[o];
         const y = verts[o + 1];
         const z = verts[o + 2];
-        if (applyBottomCapShrink(verts, o, x, y, z)) continue;
-        const d = profileOffset(x, y, z);
-        if (d === 0) continue;
+        if (applyBottomCapDome(verts, o, x, y, z)) continue;
+        const { dr, dz } = profileDisplacement(x, y, z);
+        if (dr === 0 && dz === 0) continue;
         const [nx, ny] = outwardNormal(x, y, halfL, halfW, r);
-        verts[o] += nx * d;
-        verts[o + 1] += ny * d;
+        verts[o] += nx * dr;
+        verts[o + 1] += ny * dr;
+        verts[o + 2] += dz;
       }
     };
   }
@@ -251,6 +258,7 @@ export function makeWarp(cfg: SurfacingConfig, ctx: WarpContext): WarpFn {
   }
 
   const bottomQuietEnd = bottomFillet > 0 ? zMin + bottomFillet : zMin;
+  const bottomFadeEnd = bottomQuietEnd + taperBand;
 
   return function warp(verts: Float64Array, count: number) {
     for (let i = 0; i < count; i++) {
@@ -259,15 +267,16 @@ export function makeWarp(cfg: SurfacingConfig, ctx: WarpContext): WarpFn {
       const y = verts[o + 1];
       const z = verts[o + 2];
 
-      if (applyBottomCapShrink(verts, o, x, y, z)) continue;
+      if (applyBottomCapDome(verts, o, x, y, z)) continue;
 
       if (!isShellWallVertex(x, y, z, halfL, halfW, r, zMin, zMax)) continue;
 
-      let d = profileOffset(x, y, z);
+      const { dr, dz } = profileDisplacement(x, y, z);
+      let d = dr;
       const band =
         z > bottomQuietEnd
           ? Math.min(
-              smoothstep(bottomQuietEnd, bottomQuietEnd + taperBand, z),
+              smoothstep(bottomQuietEnd, bottomFadeEnd, z),
               1 - smoothstep(zMax - taperBand, zMax, z),
             )
           : 0;
@@ -276,12 +285,12 @@ export function makeWarp(cfg: SurfacingConfig, ctx: WarpContext): WarpFn {
         const raw = Math.min(1, Math.max(0, field(x, y, z, s)));
         d += amplitude * contrast(raw) * band;
       }
-      if (d === 0) continue;
+      if (d === 0 && dz === 0) continue;
 
       const [nx, ny] = outwardNormal(x, y, halfL, halfW, r);
       verts[o] = x + nx * d;
       verts[o + 1] = y + ny * d;
-      // z is intentionally untouched: finishes/taper wrap the walls, not the caps.
+      verts[o + 2] = z + dz;
     }
   };
 }

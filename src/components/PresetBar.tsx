@@ -61,6 +61,9 @@ export function PresetBar() {
 
   const isDirty = useMemo(
     () => !paramsEqual(selectParams(useParamStore.getState()), anchor.params),
+    // paramsVersion is the intentional trigger; the params are read imperatively
+    // via getState() so the memo recomputes on any change without subscribing.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [paramsVersion, anchor],
   );
   const effectiveSelection: Selection = isDirty

@@ -98,6 +98,10 @@ export function Sidebar({ geometry, status, error, builtParams, paramsPending }:
         <Slider label="Floor Thickness" value={s.floorThickness} {...PARAM_LIMITS.floorThickness} onChange={(v) => s.setParam("floorThickness", v)} />
         <Slider label="Wall Draft" value={s.wallDraft} {...PARAM_LIMITS.wallDraft} unit="°" onChange={(v) => s.setParam("wallDraft", v)} />
         <Slider label="Bottom Radius" value={s.bottomFillet} {...PARAM_LIMITS.bottomFillet} onChange={(v) => s.setParam("bottomFillet", v)} />
+        <p className="text-[10px] text-zinc-600 leading-snug">
+          Domes the underside and eases wall draft in from the floor — no outward
+          shelf at the foot. Larger values need more height (~48% of shorter side).
+        </p>
       </Section>
 
       {/* Mounting Flange */}

@@ -23,6 +23,15 @@ const eslintConfig = defineConfig([
       "react-hooks/immutability": "off",
     },
   },
+  {
+    // Syncing an external value into controlled-input draft state (Slider), and
+    // loading persisted presets / reacting to store resets (PresetBar), are
+    // legitimate effects the React Compiler set-state-in-effect rule over-flags.
+    files: ["src/components/ui/Slider.tsx", "src/components/PresetBar.tsx"],
+    rules: {
+      "react-hooks/set-state-in-effect": "off",
+    },
+  },
 ]);
 
 export default eslintConfig;

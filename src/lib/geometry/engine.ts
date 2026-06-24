@@ -127,10 +127,8 @@ export function generate(
   const maxTan = (Math.min(halfL, halfW) * 0.8) / H;
   const draftTan = clamp(Math.tan((params.wallDraft * Math.PI) / 180), -maxTan, maxTan);
   const taperTop = H * draftTan;
-  const filletO = Math.max(
-    0,
-    Math.min(params.bottomFillet, r * 0.98, halfL * 0.9, halfW * 0.9, H * 0.45),
-  );
+  const filletMax = Math.min(halfL, halfW) * 0.48;
+  const filletO = Math.max(0, Math.min(params.bottomFillet, filletMax, H * 0.48));
 
   const isSmooth = params.surfacing === "smooth";
   const pitch = Math.max(0.6, params.featureScale);
@@ -168,7 +166,14 @@ export function generate(
 
   const P = perimeterLength(halfL, halfW, r);
   let nPerim = Math.max(16, Math.ceil(P / dsTarget));
-  let nSeg = Math.max(4, Math.ceil(H / dzTarget));
+  const dzProfile = filletO > 2 ? Math.min(dzTarget, filletO / 20) : dzTarget;
+  let nSeg =
+    filletO > 0
+      ? Math.max(
+          4,
+          Math.ceil(filletO / dzProfile) + Math.ceil(Math.max(0, H - filletO) / dzTarget),
+        )
+      : Math.max(4, Math.ceil(H / dzTarget));
 
   let densityClamped = false;
   if (nPerim * (nSeg + 1) > MAX_SIDE_VERTS) {
@@ -263,6 +268,7 @@ export function generate(
         taperBand,
         draftTan,
         bottomFillet: filletO,
+        profileBaseZ: 0,
       }),
     ),
   );
@@ -341,8 +347,13 @@ export function generate(
     cavityShrunk.extrude(cavityH, cavitySeg - 1).translate(0, 0, cavityFloorZ),
   );
   cavity = breakCapFans(cavity, keep, discard, 1);
-  // Interior: draft only (no fillet — fillet on the cutter folds floor corners).
-  if (draftTan !== 0) {
+  // Interior: same draft + bottom fillet as the exterior, measured from the same
+  // global base (profileBaseZ 0) so the wall stays constant-thickness and the
+  // inside bottom rounds to match the outside. Inner fillet is clamped to its own
+  // corner radius so the cavity can't fold at the corners.
+  const filletIMax = Math.min(innerHalfL, innerHalfW) * 0.48;
+  const filletI = Math.min(filletO, filletIMax, H * 0.48);
+  if (draftTan !== 0 || filletI > 0) {
     cavity = keep(
       cavity.warpBatch(
         makeWarp(
@@ -362,6 +373,8 @@ export function generate(
             zMax: topZ + 2,
             taperBand: 0,
             draftTan,
+            bottomFillet: filletI,
+            profileBaseZ: 0,
           },
         ),
       ),
@@ -392,8 +405,7 @@ export function generate(
     const clearance = clamp(params.lidClearance, 0, 1); // press-fit gap (mm)
     const lipWall = Math.min(t, 2.0);
     const lipH = Math.min(Math.max(0, params.lidLipHeight), (H - floorT) * 0.85);
-    const plateT = Math.max(t * 1.5, 2.4);
-    const lidTaper = Math.min(plateT * 0.25, taperBand);
+    const plateT = Math.max(t * 1.5, 1.2);
 
     // Plate footprint matches the body top (flange) exactly so it sits flush.
     const plateSpacing = perimSpacing(topHalfL, topHalfW, topR, nPerim);
@@ -405,18 +417,10 @@ export function generate(
     );
     const plateSeg = Math.max(2, Math.ceil(plateT / Math.max(0.6, dzTarget)));
     const plateRaw = keep(plateCS.extrude(plateT, plateSeg - 1));
-    const plate = keep(
-      plateRaw.warpBatch(
-        makeWarp(surfacingCfg, {
-          halfL: topHalfL,
-          halfW: topHalfW,
-          r: topR,
-          zMin: 0,
-          zMax: plateT,
-          taperBand: lidTaper,
-        }),
-      ),
-    );
+    // The lid is a clean smooth plate that matches by footprint + flange coverage.
+    // Algorithmic surfacing on its thin (~plateT) edge scallops badly — the rib
+    // pitch dwarfs the band height — so it is intentionally omitted here.
+    const plate = breakCapFans(plateRaw, keep, discard, 1);
 
     // Plug ring: fits inside the opening with clearance, hangs below the plate.
     // The lid plugs into the opening at the (tapered) top of the cavity.
