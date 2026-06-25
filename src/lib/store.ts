@@ -3,7 +3,10 @@
 // subscribes imperatively (outside React render) to feed the worker.
 
 import { create } from "zustand";
-import { surfacingPatchForType } from "./paramPresets";
+import { useShallow } from "zustand/react/shallow";
+import { surfacingDefaultsForBox, clampParamsToDerived } from "./paramDerivation";
+import { baseEdgeMaxSize, topEdgeMaxSize } from "./paramValidation";
+import { fitClearance } from "./printProfiles";
 import { DEFAULT_PARAMS, type ReceptacleParams, type SurfacingType } from "./types";
 
 interface ParamStore extends ReceptacleParams {
@@ -21,13 +24,20 @@ interface ParamStore extends ReceptacleParams {
   reset: () => void;
 }
 
+const KEY_DIM_KEYS = new Set<keyof ReceptacleParams>([
+  "length",
+  "width",
+  "height",
+  "wallThickness",
+]);
+
 export const useParamStore = create<ParamStore>((set) => ({
   ...DEFAULT_PARAMS,
   resetTick: 0,
   paramsVersion: 0,
   setParam: (key, value) =>
     set((state) => {
-      const next = { ...state, [key]: value, paramsVersion: state.paramsVersion + 1 } as ParamStore;
+      let next = { ...state, [key]: value, paramsVersion: state.paramsVersion + 1 } as ParamStore;
       if (key === "surfacing" && value === "smooth") {
         next.amplitude = 0;
       }
@@ -35,11 +45,38 @@ export const useParamStore = create<ParamStore>((set) => ({
         const maxR = Math.min(next.length, next.width) / 2;
         if (next.cornerRadius > maxR) next.cornerRadius = maxR;
       }
+      if (key === "baseEdgeType") {
+        if (value === "none") {
+          next.baseEdgeSize = 0;
+        } else if (next.baseEdgeSize <= 0) {
+          const p = selectParams(next);
+          const max = baseEdgeMaxSize({ ...p, baseEdgeType: value as ReceptacleParams["baseEdgeType"] });
+          // Start at a clearly visible size (≈60% of feasible) so enabling the
+          // edge does something obvious — the user tunes from there.
+          next.baseEdgeSize = Number((max * 0.6).toFixed(1));
+        }
+      }
+      if (key === "topEdgeType") {
+        if (value === "none") {
+          next.topEdgeSize = 0;
+        } else if (next.topEdgeSize <= 0) {
+          const p = selectParams(next);
+          const max = topEdgeMaxSize({ ...p, topEdgeType: value as ReceptacleParams["topEdgeType"] });
+          next.topEdgeSize = Number((max * 0.6).toFixed(1));
+        }
+      }
+      // Material or fit class changing re-derives the recommended lid clearance.
+      if (key === "material" || key === "lidFit") {
+        next.lidClearance = fitClearance(next.material, next.lidFit);
+      }
+      if (KEY_DIM_KEYS.has(key)) {
+        next = { ...next, ...clampParamsToDerived(selectParams(next)) };
+      }
       return next;
     }),
   applySurfacing: (type) =>
     set((state) => {
-      const patch = surfacingPatchForType(type);
+      const patch = surfacingDefaultsForBox(type, state);
       const next = {
         ...state,
         ...patch,
@@ -47,11 +84,27 @@ export const useParamStore = create<ParamStore>((set) => ({
         paramsVersion: state.paramsVersion + 1,
       } as ParamStore;
       if (type === "smooth") next.amplitude = 0;
-      return next;
+      return { ...next, ...clampParamsToDerived(selectParams(next)) };
     }),
   loadParams: (params) =>
     set((state) => {
-      const next = { ...state, ...params, paramsVersion: state.paramsVersion + 1 } as ParamStore;
+      const migrated = { ...params } as Partial<ReceptacleParams> & {
+        bottomFillet?: number;
+      };
+      if (migrated.baseEdgeType === undefined) {
+        migrated.baseEdgeType = "none";
+        migrated.baseEdgeSize = 0;
+      }
+      if (migrated.topEdgeType === undefined) {
+        migrated.topEdgeType = "none";
+        migrated.topEdgeSize = 0;
+      }
+      delete migrated.bottomFillet;
+      const next = {
+        ...state,
+        ...migrated,
+        paramsVersion: state.paramsVersion + 1,
+      } as ParamStore;
       const maxR = Math.min(next.length, next.width) / 2;
       if (next.cornerRadius > maxR) next.cornerRadius = maxR;
       return next;
@@ -72,7 +125,14 @@ const PARAM_KEYS: (keyof ReceptacleParams)[] = [
   "wallThickness",
   "floorThickness",
   "wallDraft",
-  "bottomFillet",
+  "baseEdgeType",
+  "baseEdgeSize",
+  "topEdgeType",
+  "topEdgeSize",
+  "footRing",
+  "drainHoles",
+  "drainHoleDiameter",
+  "interiorFillet",
   "flangeWidth",
   "flangeThickness",
   "surfacing",
@@ -82,6 +142,9 @@ const PARAM_KEYS: (keyof ReceptacleParams)[] = [
   "sharpness",
   "distortion",
   "smoothing",
+  "material",
+  "lidFit",
+  "compensateShrink",
   "includeLid",
   "lidClearance",
   "lidLipHeight",
@@ -104,4 +167,9 @@ export function selectParams(state: ParamStore): ReceptacleParams {
     (out as any)[k] = state[k];
   }
   return out;
+}
+
+/** React hook — shallow-stable snapshot of generation params (safe in render). */
+export function useGenerationParams(): ReceptacleParams {
+  return useParamStore(useShallow(selectParams));
 }

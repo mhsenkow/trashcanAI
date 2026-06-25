@@ -8,14 +8,18 @@ const overrides =
   variant === "smooth0"
     ? { smoothing: 0 }
     : variant === "fillet0"
-      ? { bottomFillet: 0 }
-      : {};
+      ? { baseEdgeType: "none", baseEdgeSize: 0 }
+      : variant === "fillet2"
+        ? { baseEdgeType: "fillet", baseEdgeSize: 2 }
+        : {};
 
 const wasm = await Module();
 wasm.setup();
 const g = generate(wasm, { ...DEFAULT_PARAMS, ...overrides });
 const halfL = DEFAULT_PARAMS.length / 2;
-console.log(`${variant} halfL=${halfL} fillet=${overrides.bottomFillet ?? DEFAULT_PARAMS.bottomFillet}`);
+console.log(
+  `${variant} halfL=${halfL} baseEdge=${overrides.baseEdgeType ?? DEFAULT_PARAMS.baseEdgeType}@${overrides.baseEdgeSize ?? DEFAULT_PARAMS.baseEdgeSize}`,
+);
 for (const z of [0, 1, 2, 3, 4, 5, 6, 8, 10]) {
   const x = rightEdgeXNearZ(g.body.positions, z);
   console.log(`  z=${z.toFixed(0)} edgeX=${x.toFixed(2)} (Δnom=${(x - halfL).toFixed(2)})`);

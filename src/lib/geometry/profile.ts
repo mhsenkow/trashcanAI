@@ -140,6 +140,93 @@ export function perimeterParam(
   return eY + cQ + eX + cQ + eY + cQ + (x + ax); // bottom edge
 }
 
+const WALL_Z_EPS = 1e-3;
+
+/** True on the outer perimeter of a horizontal cap (floor or lid disc edge). */
+export function isExteriorCapRingVertex(
+  x: number,
+  y: number,
+  z: number,
+  halfL: number,
+  halfW: number,
+  r: number,
+  zMin: number,
+  zMax: number,
+): boolean {
+  if (Math.abs(z - zMin) > WALL_Z_EPS && Math.abs(z - zMax) > WALL_Z_EPS) return false;
+  const cr = clampRadius(halfL, halfW, r);
+  const ax = halfL - cr;
+  const ay = halfW - cr;
+  if (Math.abs(x) < ax - WALL_Z_EPS && Math.abs(y) < ay - WALL_Z_EPS) return false;
+  return Math.abs(roundedRectSdf(x, y, halfL, halfW, r)) < 0.35;
+}
+
+/**
+ * Vertical side-wall faces only — excludes floor/top cap discs so warp does not
+ * tear the cap fans or shred the wall–floor junction.
+ */
+export function isVerticalWallVertex(
+  x: number,
+  y: number,
+  z: number,
+  halfL: number,
+  halfW: number,
+  r: number,
+  zMin: number,
+  zMax: number,
+): boolean {
+  if (z <= zMin + WALL_Z_EPS || z >= zMax - WALL_Z_EPS) return false;
+  const cr = clampRadius(halfL, halfW, r);
+  const ax = halfL - cr;
+  const ay = halfW - cr;
+  if (Math.abs(x) < ax - WALL_Z_EPS && Math.abs(y) < ay - WALL_Z_EPS) return false;
+  return true;
+}
+
+/** Signed distance to the rounded-rectangle boundary (negative inside the profile). */
+export function roundedRectSdf(
+  x: number,
+  y: number,
+  halfL: number,
+  halfW: number,
+  r: number,
+): number {
+  r = clampRadius(halfL, halfW, r);
+  const ax = halfL - r;
+  const ay = halfW - r;
+  const qx = Math.abs(x) - ax;
+  const qy = Math.abs(y) - ay;
+  return (
+    Math.hypot(Math.max(qx, 0), Math.max(qy, 0)) + Math.min(Math.max(qx, qy), 0) - r
+  );
+}
+
+/**
+ * Outward unit normal from the rounded-rect SDF gradient. Unlike the piecewise
+ * `outwardNormal`, this stays continuous across straight/corner tangents so
+ * ribbing and lattice warps do not tear the shell open at vertical corners.
+ */
+export function outwardNormalSmooth(
+  x: number,
+  y: number,
+  halfL: number,
+  halfW: number,
+  r: number,
+): Pt {
+  const eps = Math.max(0.04, r * 0.07);
+  const gx =
+    (roundedRectSdf(x + eps, y, halfL, halfW, r) -
+      roundedRectSdf(x - eps, y, halfL, halfW, r)) /
+    (2 * eps);
+  const gy =
+    (roundedRectSdf(x, y + eps, halfL, halfW, r) -
+      roundedRectSdf(x, y - eps, halfL, halfW, r)) /
+    (2 * eps);
+  const l = Math.hypot(gx, gy);
+  if (l < 1e-10) return outwardNormal(x, y, halfL, halfW, r);
+  return [gx / l, gy / l];
+}
+
 /** Outward (exterior) unit normal of the rounded rectangle at a boundary point. */
 export function outwardNormal(
   x: number,

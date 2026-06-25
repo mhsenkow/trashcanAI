@@ -12,24 +12,40 @@
 import type { CrossSection, Manifold, ManifoldToplevel, Mesh } from "manifold-3d";
 import { clampRadius, perimeterLength, roundedRectPoints } from "./profile";
 import { analyzeTopology } from "./meshAnalysis";
+import { evaluateBaseEdge, evaluateTopEdge } from "../paramValidation";
+import { amplitudeCapForSurfacing } from "../paramDerivation";
 import { makeWarp } from "./surfacing";
+import { shrinkScale } from "../printProfiles";
 import type {
   GeneratedGeometry,
   GeneratedPart,
+  GenerateQuality,
   ReceptacleParams,
 } from "../types";
+
+export interface GenerateOptions {
+  quality?: GenerateQuality;
+}
 
 // Soft cap on base side-wall vertices so pathological pitch/size combos can't
 // melt the browser; horizontal & vertical density scale down together.
 const MAX_SIDE_VERTS = 900_000;
 // Cap on the post-subdivision triangle count (smoothing refine is clamped to it).
 const FINAL_TRI_BUDGET = 2_500_000;
+// Post-boolean shells above this trip manifold's smoothOut on warped geometry (WASM trap).
+const SMOOTH_INPUT_TRI_MAX = 320_000;
+// Interactive preview — coarser mesh, no smoothing, skips heavy refine passes.
+const PREVIEW_DENSITY_SCALE = 10;
+const PREVIEW_MAX_SIDE_VERTS = 40_000;
+const PREVIEW_TRI_BUDGET = 80_000;
 // Post-hollow smoothOut threshold (deg). Interior 90° corners stay crisp; ribs still soften.
 const SMOOTH_MIN_ANGLE = 86;
 // Lift cavity bottom above the floor slab so the cutter cap does not notch floor corners.
 const CAVITY_FLOOR_LIFT = 0.35;
 // Shrink cavity profile slightly so the boolean leaves a hair of wall at interior corners.
 const CAVITY_INSET = 0.12;
+// Overlap flange into the wall before the shared warp fuses them (mm).
+const FLANGE_WELD = 1.0;
 
 const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
 
@@ -38,6 +54,55 @@ function cornerMinSegs(radius: number, spacing: number): number {
   if (radius < 0.05) return 8;
   const arcLen = (Math.PI / 2) * radius;
   return Math.min(40, Math.max(12, Math.ceil(arcLen / Math.max(spacing, 0.05))));
+}
+
+/**
+ * Extrude with a fine foot stack (chamfer band + surfacing/draft fade) and a
+ * coarser shaft above. Prevents preview meshes from jumping 10+ mm before the
+ * first warp ring — that gap shredded the wall–floor junction.
+ */
+function extrudeWithFootBand(
+  cs: CrossSection,
+  height: number,
+  footBand: number,
+  edgeBand: number,
+  dzBody: number,
+): Manifold {
+  const bodySegs = Math.max(2, Math.ceil(height / dzBody));
+  if (footBand <= 0 || footBand >= height - 1e-6) {
+    return cs.extrude(height, bodySegs - 1);
+  }
+
+  let z = 0;
+  let foot: Manifold | null = null;
+
+  if (edgeBand > 0) {
+    const edgeSpacing = clamp(edgeBand / 8, 0.025, 0.35);
+    const edgeSegs = Math.max(4, Math.ceil(edgeBand / edgeSpacing));
+    foot = cs.extrude(edgeBand, edgeSegs - 1);
+    z = edgeBand;
+  }
+
+  const transition = footBand - z;
+  if (transition > 0.05) {
+    const transSpacing = clamp(transition / 6, 0.2, 2);
+    const transSegs = Math.max(3, Math.ceil(transition / transSpacing));
+    const trans = cs.extrude(transition, transSegs - 1).translate(0, 0, z);
+    foot = foot ? foot.add(trans) : trans;
+    z = footBand;
+  }
+
+  if (!foot) {
+    const transSpacing = clamp(footBand / 6, 0.2, 2);
+    const transSegs = Math.max(3, Math.ceil(footBand / transSpacing));
+    foot = cs.extrude(footBand, transSegs - 1);
+    z = footBand;
+  }
+
+  const bodyHeight = height - z;
+  const bodySegCount = Math.max(2, Math.ceil(bodyHeight / dzBody));
+  const shaft = cs.extrude(bodyHeight, bodySegCount - 1).translate(0, 0, z);
+  return foot.add(shaft);
 }
 
 /** Perimeter spacing that yields ~`nPerim` vertices around a rounded rectangle. */
@@ -110,7 +175,9 @@ function bbox(positions: Float32Array): [number, number, number] {
 export function generate(
   wasm: ManifoldToplevel,
   params: ReceptacleParams,
+  options: GenerateOptions = {},
 ): GeneratedGeometry {
+  const isPreview = options.quality === "preview";
   const t0 = performance.now();
   const { CrossSection } = wasm;
 
@@ -120,23 +187,37 @@ export function generate(
   const halfL = L / 2;
   const halfW = W / 2;
   const t = clamp(params.wallThickness, 0.8, Math.min(halfL, halfW) - 0.5);
-  const r = clampRadius(halfL, halfW, params.cornerRadius);
+  const rUser = clampRadius(halfL, halfW, params.cornerRadius);
   const floorT = clamp(params.floorThickness, 0.8, H - 2);
 
-  // Wall draft + bottom fillet are height-dependent radial offsets in the warp.
+  // Wall draft (outward) + base edge inset (inward cut at the foot) warp the shell.
   const maxTan = (Math.min(halfL, halfW) * 0.8) / H;
   const draftTan = clamp(Math.tan((params.wallDraft * Math.PI) / 180), -maxTan, maxTan);
   const taperTop = H * draftTan;
-  const filletMax = Math.min(halfL, halfW) * 0.48;
-  const filletO = Math.max(0, Math.min(params.bottomFillet, filletMax, H * 0.48));
+  const baseEdge = evaluateBaseEdge(params);
+  const edgeO = baseEdge.effectiveSize;
+  const edgeType = params.baseEdgeType;
+  const hasBaseEdge = edgeType !== "none" && edgeO > 0;
+  const topEdge = evaluateTopEdge(params);
+  const topEdgeO = topEdge.effectiveSize;
+  const topEdgeType = params.topEdgeType;
+
+  // A rounded vertical corner turns inside-out if the foot is pulled inward past
+  // its radius — that was the sliver "overhang" at the corners. So the box
+  // corners round to keep pace with the foot edge (a hair more, so a sliver of
+  // rounded corner still survives at the very floor). This is what lets the base
+  // fillet/chamfer go large and stay a clean, watertight mesh. The corner slider
+  // is the *minimum* vertical radius; a bigger foot edge rounds the box further.
+  const r = hasBaseEdge
+    ? clampRadius(halfL, halfW, Math.max(rUser, edgeO * 1.12))
+    : rUser;
 
   const isSmooth = params.surfacing === "smooth";
   const pitch = Math.max(0.6, params.featureScale);
-  // Outward-only displacement clamped so adjacent features can never fold the
-  // surface onto itself (keeps the warped manifold geometrically valid).
+  const ampCap = amplitudeCapForSurfacing(params.surfacing, pitch, t);
   const effectiveAmplitude = isSmooth
     ? 0
-    : Math.min(Math.max(0, params.amplitude), 0.45 * pitch);
+    : Math.min(Math.max(0, params.amplitude), ampCap);
 
   // Vertical ribbing is the only z-invariant finish (unless domain-warped).
   const needsZResolution =
@@ -157,29 +238,46 @@ export function generate(
   const featureSpacing = isSmooth ? 0.45 : clamp((pitch / 8) * distortF, 0.15, 2.5);
   // Corner arcs need finer sampling than rib pitch alone — keeps rounds smooth.
   const cornerSpacing = r > 0 ? r / 20 : featureSpacing;
-  const dsTarget = Math.min(featureSpacing, cornerSpacing);
-  const dzTarget = isSmooth
+  let dsTarget = Math.min(featureSpacing, cornerSpacing);
+  let dzTarget = isSmooth
     ? Math.max(1.2, taperBand / 3)
     : needsZResolution
       ? clamp((pitch / 8) * distortF, 0.15, 2.5)
       : clamp(taperBand / 3, 0.4, 1.5);
+  if (isPreview) {
+    dsTarget *= PREVIEW_DENSITY_SCALE;
+    dzTarget *= PREVIEW_DENSITY_SCALE;
+    if (needsZResolution) {
+      dsTarget *= 1.5;
+      dzTarget *= 1.5;
+    }
+  }
+
+  const maxSideVerts = isPreview ? PREVIEW_MAX_SIDE_VERTS : MAX_SIDE_VERTS;
+  const triBudget = isPreview ? PREVIEW_TRI_BUDGET : FINAL_TRI_BUDGET;
 
   const P = perimeterLength(halfL, halfW, r);
   let nPerim = Math.max(16, Math.ceil(P / dsTarget));
-  const dzProfile = filletO > 2 ? Math.min(dzTarget, filletO / 20) : dzTarget;
-  let nSeg =
-    filletO > 0
-      ? Math.max(
-          4,
-          Math.ceil(filletO / dzProfile) + Math.ceil(Math.max(0, H - filletO) / dzTarget),
-        )
-      : Math.max(4, Math.ceil(H / dzTarget));
+  const edgeBand = edgeO;
+  const footBand = Math.max(edgeBand, taperBand);
+  const edgeVertSpacing = edgeBand > 0 ? clamp(edgeBand / 8, 0.025, 0.35) : 0;
+  const edgeSegs =
+    edgeBand > 0 ? Math.max(4, Math.ceil(edgeBand / edgeVertSpacing)) : 0;
+  const transitionBand = Math.max(0, footBand - edgeBand);
+  const transSegs =
+    transitionBand > 0.05
+      ? Math.max(3, Math.ceil(transitionBand / clamp(transitionBand / 6, 0.2, 2)))
+      : 0;
+  const bodyHeight = Math.max(0, H - footBand);
+  let nBodySeg = Math.max(2, Math.ceil(bodyHeight / dzTarget));
 
   let densityClamped = false;
-  if (nPerim * (nSeg + 1) > MAX_SIDE_VERTS) {
-    const f = Math.sqrt(MAX_SIDE_VERTS / (nPerim * (nSeg + 1)));
+  let smoothingClamped = false;
+  const sideVertBudget = nPerim * (edgeSegs + transSegs + nBodySeg + 1);
+  if (sideVertBudget > maxSideVerts) {
+    const f = Math.sqrt(maxSideVerts / sideVertBudget);
     nPerim = Math.max(16, Math.floor(nPerim * f));
-    nSeg = Math.max(4, Math.floor(nSeg * f));
+    nBodySeg = Math.max(2, Math.floor(nBodySeg * f));
     densityClamped = true;
   }
 
@@ -210,13 +308,18 @@ export function generate(
     distortion: params.distortion,
   };
 
-  const smoothLevel = params.smoothing;
+  const smoothLevel = isPreview ? 0 : params.smoothing;
 
   /** Refine only — pre-hollow smoothOut warps the cut surface and opens interior corners. */
   const densifyBeforeCut = (m: Manifold): Manifold => {
-    const passes = smoothLevel > 0 ? Math.min(2, smoothLevel) : 1;
+    if (isPreview) return m;
+    const maxPasses = smoothLevel > 0 ? Math.min(2, smoothLevel) : 1;
     let work = m;
-    for (let i = 0; i < passes; i++) {
+    for (let i = 0; i < maxPasses; i++) {
+      if (work.numTri() >= SMOOTH_INPUT_TRI_MAX / 2) {
+        if (smoothLevel > 0) smoothingClamped = true;
+        break;
+      }
       const next = work.refine(1);
       if (next.numTri() <= 0 || next.status() !== "NoError") {
         next.delete();
@@ -229,20 +332,24 @@ export function generate(
   };
 
   /** G1-smooth after the boolean so interior 90° joints are not pre-warped. */
-  const finishMesh = (m: Manifold, triBudget = FINAL_TRI_BUDGET): Manifold => {
+  const finishMesh = (m: Manifold, partTriBudget = triBudget): Manifold => {
     if (smoothLevel <= 0) return m;
     const baseTri = m.numTri();
     if (baseTri <= 0) return m;
+    if (baseTri > SMOOTH_INPUT_TRI_MAX) {
+      smoothingClamped = true;
+      return m;
+    }
 
     const smoothed = keep(m.smoothOut(SMOOTH_MIN_ANGLE, 0));
     const n = Math.min(
       smoothLevel + 1,
-      Math.max(2, Math.floor(Math.sqrt(triBudget / baseTri))),
+      Math.max(2, Math.floor(Math.sqrt(partTriBudget / baseTri))),
     );
     if (n < 2) return release(smoothed);
 
     const refined = smoothed.refine(n);
-    if (refined.numTri() > triBudget || refined.status() !== "NoError") {
+    if (refined.numTri() > partTriBudget || refined.status() !== "NoError") {
       refined.delete();
       return release(smoothed);
     }
@@ -255,31 +362,16 @@ export function generate(
   const outerCS = keep(
     new CrossSection(roundedRectPoints(halfL, halfW, r, outerSpacing, outerCorners)),
   );
-  let outer = keep(outerCS.extrude(H, nSeg - 1));
-  outer = breakCapFans(outer, keep, discard, 2);
-  const outerSurfaced = keep(
-    outer.warpBatch(
-      makeWarp(surfacingCfg, {
-        halfL,
-        halfW,
-        r,
-        zMin: 0,
-        zMax: H,
-        taperBand,
-        draftTan,
-        bottomFillet: filletO,
-        profileBaseZ: 0,
-      }),
-    ),
-  );
+  let outer = keep(extrudeWithFootBand(outerCS, H, footBand, edgeBand, dzTarget));
+  outer = breakCapFans(outer, keep, discard, isPreview ? 1 : 2);
 
-  // 2b. Optional outward mounting flange at the top rim, so the receptacle can
-  // drop into a cutout and hang by the flange resting on the edge. The top
-  // footprint (flange when present, otherwise the walls) is what the lid covers.
+  // 2b. Optional mounting flange — unioned before warp so draft + surfacing
+  // displace wall and rim together (avoids a floating lip gap at the junction).
   const flangeW = Math.max(0, params.flangeWidth);
   const flangeT = clamp(params.flangeThickness, 1, 20);
   const hasFlange = flangeW > 0.05;
-  // The walls' outer footprint at the top, after taper.
+  const topZ = H + (hasFlange ? flangeT : 0);
+  // Post-warp outer footprint (stats / lid plate).
   const wallTopHalfL = halfL + taperTop;
   const wallTopHalfW = halfW + taperTop;
   const wallTopR = Math.max(0.1, r + taperTop);
@@ -287,45 +379,70 @@ export function generate(
   const topHalfW = hasFlange ? wallTopHalfW + flangeW : wallTopHalfW;
   const topR = hasFlange ? wallTopR + flangeW : wallTopR;
 
-  let solid: Manifold = outerSurfaced;
+  let solid: Manifold = outer;
   if (hasFlange) {
-    const flangeSpacing = perimSpacing(topHalfL, topHalfW, topR, nPerim);
-    const flangeCorners = cornerMinSegs(topR, flangeSpacing);
-    const wallTopSpacing = perimSpacing(wallTopHalfL, wallTopHalfW, wallTopR, nPerim);
-    const wallTopCorners = cornerMinSegs(wallTopR, wallTopSpacing);
+    const flangeOuterHalfL = halfL + flangeW;
+    const flangeOuterHalfW = halfW + flangeW;
+    const flangeOuterR = r + flangeW;
+    const flangeSpacing = perimSpacing(flangeOuterHalfL, flangeOuterHalfW, flangeOuterR, nPerim);
+    const flangeCorners = cornerMinSegs(flangeOuterR, flangeSpacing);
+    const wallSpacing = perimSpacing(halfL, halfW, r, nPerim);
+    const wallCorners = cornerMinSegs(r, wallSpacing);
     const flangeSeg = Math.max(2, Math.ceil(flangeT / Math.min(dzTarget, flangeT / 3)));
     const flangeOuterCS = keep(
       new CrossSection(
-        roundedRectPoints(topHalfL, topHalfW, topR, flangeSpacing, flangeCorners),
-      ),
-    );
-    const flangeInnerCS = keep(
-      new CrossSection(
         roundedRectPoints(
-          wallTopHalfL,
-          wallTopHalfW,
-          wallTopR,
-          wallTopSpacing,
-          wallTopCorners,
+          flangeOuterHalfL,
+          flangeOuterHalfW,
+          flangeOuterR,
+          flangeSpacing,
+          flangeCorners,
         ),
       ),
     );
-    const flangeOuter = keep(flangeOuterCS.extrude(flangeT, flangeSeg - 1));
+    const flangeInnerCS = keep(
+      new CrossSection(roundedRectPoints(halfL, halfW, r, wallSpacing, wallCorners)),
+    );
+    const flangeOuter = keep(flangeOuterCS.extrude(flangeT + FLANGE_WELD, flangeSeg));
     const flangeInner = keep(
-      flangeInnerCS.extrude(flangeT + 2, flangeSeg - 1).translate(0, 0, -1),
+      flangeInnerCS.extrude(flangeT + FLANGE_WELD * 2, flangeSeg).translate(0, 0, -FLANGE_WELD),
     );
     const flangeRing = keep(
-      flangeOuter.subtract(flangeInner).translate(0, 0, H),
+      flangeOuter.subtract(flangeInner).translate(0, 0, H - FLANGE_WELD),
     );
-    solid = outerSurfaced.add(flangeRing);
+    solid = keep(outer.add(flangeRing));
+    discard(outer);
   }
+
+  const outerSurfaced = keep(
+    solid.warpBatch(
+      makeWarp(surfacingCfg, {
+        halfL,
+        halfW,
+        r,
+        zMin: 0,
+        zMax: topZ,
+        surfacingMaxZ: H,
+        taperBand,
+        draftTan,
+        baseEdgeType: edgeType,
+        baseEdgeSize: edgeO,
+        topEdgeType,
+        topEdgeSize: topEdgeO,
+        topEdgeZ: H,
+        topEdgeBrim: hasFlange,
+        profileBaseZ: 0,
+      }),
+    ),
+  );
+  solid = outerSurfaced;
 
   // 3. Smooth inner cavity -> subtract to hollow + leave a floor.
   // The opening runs all the way up through the flange.
   const innerHalfL = halfL - t;
   const innerHalfW = halfW - t;
   const innerR = clampRadius(innerHalfL, innerHalfW, Math.max(0, r - t));
-  const topZ = H + (hasFlange ? flangeT : 0);
+  // topZ computed above with flange
   // Match the outer wall mesh density so the boolean cut leaves a clean interior
   // instead of coarse facets that smoothOut/refine would later fold into shards.
   const innerP = perimeterLength(innerHalfL, innerHalfW, innerR);
@@ -347,13 +464,33 @@ export function generate(
     cavityShrunk.extrude(cavityH, cavitySeg - 1).translate(0, 0, cavityFloorZ),
   );
   cavity = breakCapFans(cavity, keep, discard, 1);
-  // Interior: same draft + bottom fillet as the exterior, measured from the same
-  // global base (profileBaseZ 0) so the wall stays constant-thickness and the
-  // inside bottom rounds to match the outside. Inner fillet is clamped to its own
-  // corner radius so the cavity can't fold at the corners.
-  const filletIMax = Math.min(innerHalfL, innerHalfW) * 0.48;
-  const filletI = Math.min(filletO, filletIMax, H * 0.48);
-  if (draftTan !== 0 || filletI > 0) {
+  // Interior: same draft + base edge as the exterior, measured from the same
+  // global base (profileBaseZ 0) so the wall stays constant-thickness.
+  const innerEdgeMax = Math.min(innerHalfL, innerHalfW) * 0.48;
+  // Inner edge tracks the outer (same profile, same base) so the wall stays
+  // constant-thickness through the band — clamped by the inner footprint and the
+  // inner corner radius (so the cavity corners can't invert), never by wall
+  // thickness (that would pinch the foot for any visible fillet).
+  const innerCornerCap = innerR > 0.5 ? innerR : innerEdgeMax;
+  // Independent interior wall→floor fillet (#25): rounds the inside bottom for
+  // strength/cleanability even when the exterior foot is sharp. Takes the larger
+  // of the outer-coupled edge and the requested interior fillet.
+  const interiorFilletC = Math.min(
+    Math.max(0, params.interiorFillet),
+    innerEdgeMax,
+    innerCornerCap,
+    H * 0.48,
+  );
+  const edgeI = Math.min(
+    Math.max(edgeO, interiorFilletC),
+    innerEdgeMax,
+    innerCornerCap,
+    H * 0.48,
+  );
+  // Use a fillet when the interior fillet drives the size; else match the exterior.
+  const innerEdgeType: typeof edgeType =
+    interiorFilletC > edgeO ? "fillet" : edgeType;
+  if (draftTan !== 0 || edgeI > 0) {
     cavity = keep(
       cavity.warpBatch(
         makeWarp(
@@ -373,7 +510,8 @@ export function generate(
             zMax: topZ + 2,
             taperBand: 0,
             draftTan,
-            bottomFillet: filletI,
+            baseEdgeType: innerEdgeType,
+            baseEdgeSize: edgeI,
             profileBaseZ: 0,
           },
         ),
@@ -382,11 +520,66 @@ export function generate(
   }
   // Densify before the boolean (no smoothOut), hollow, then finish the exterior.
   const shell = densifyBeforeCut(solid);
-  if (solid !== outerSurfaced) solid.delete();
+  if (solid !== outerSurfaced && shell !== solid) solid.delete();
   const hollow = shell.subtract(cavity);
   discard(shell);
   const bodyFinished = finishMesh(hollow);
-  const body = release(bodyFinished);
+  let body = release(bodyFinished);
+
+  // Base-floor options: recess the underside to a perimeter rim (#27) and/or
+  // punch drainage holes through the floor (#34). Built as cutters and removed
+  // in one boolean so the result stays a single watertight shell.
+  {
+    const cutters: Manifold[] = [];
+    if (params.footRing) {
+      const rim = Math.min(3, Math.min(halfL, halfW) * 0.25);
+      const depth = 0.6;
+      const fl = halfL - rim;
+      const fw = halfW - rim;
+      if (fl > 2 && fw > 2) {
+        const fr = clampRadius(fl, fw, Math.max(0, r - rim));
+        const recessCS = new CrossSection(
+          roundedRectPoints(fl, fw, fr, Math.max(fl, fw) / 40, 16),
+        );
+        cutters.push(recessCS.extrude(depth + 1).translate(0, 0, -1));
+        recessCS.delete();
+      }
+    }
+    if (params.drainHoles && params.drainHoleDiameter >= 1.5) {
+      const rad = params.drainHoleDiameter / 2;
+      const margin = t + 3 + rad;
+      const usableL = Math.max(0, (innerHalfL - margin) * 2);
+      const usableW = Math.max(0, (innerHalfW - margin) * 2);
+      const spacing = Math.max(params.drainHoleDiameter * 2, params.drainHoleDiameter + 6);
+      const nx = Math.min(8, Math.max(1, Math.floor(usableL / spacing) + 1));
+      const ny = Math.min(8, Math.max(1, Math.floor(usableW / spacing) + 1));
+      const stepX = nx > 1 ? usableL / (nx - 1) : 0;
+      const stepY = ny > 1 ? usableW / (ny - 1) : 0;
+      const holeH = floorT + CAVITY_FLOOR_LIFT + 3;
+      for (let i = 0; i < nx; i++) {
+        for (let j = 0; j < ny; j++) {
+          const cx = (nx > 1 ? -usableL / 2 + i * stepX : 0);
+          const cy = (ny > 1 ? -usableW / 2 + j * stepY : 0);
+          cutters.push(
+            CrossSection.circle(rad, 24).extrude(holeH).translate(cx, cy, -1),
+          );
+        }
+      }
+    }
+    if (cutters.length) {
+      let cut = cutters[0];
+      for (let i = 1; i < cutters.length; i++) {
+        const u = cut.add(cutters[i]);
+        cut.delete();
+        cutters[i].delete();
+        cut = u;
+      }
+      const drilled = body.subtract(cut);
+      cut.delete();
+      body.delete();
+      body = drilled;
+    }
+  }
 
   if (body.status() !== "NoError" || body.isEmpty()) {
     body.delete();
@@ -394,13 +587,20 @@ export function generate(
   }
 
   const watertight = body.status() === "NoError" && !body.isEmpty();
-  const bodyMesh = body.getMesh();
+  // Optional uniform up-scale so the printed part lands on-size after the
+  // material shrinks as it cools (#12). <1.5% — preview reads the same.
+  const shrink = params.compensateShrink ? shrinkScale(params.material) : 1;
+  const bodyScaled = shrink !== 1 ? body.scale([shrink, shrink, shrink]) : body;
+  if (bodyScaled !== body) body.delete();
+  const bodyVolume = bodyScaled.volume();
+  const bodyMesh = bodyScaled.getMesh();
   const bodyPart = meshToPart(bodyMesh);
-  body.delete();
+  bodyScaled.delete();
 
   // 4. Matching friction-fit lid.
   let lidPart: GeneratedPart | null = null;
   let lidTriangles = 0;
+  let lidVolume = 0;
   if (params.includeLid) {
     const clearance = clamp(params.lidClearance, 0, 1); // press-fit gap (mm)
     const lipWall = Math.min(t, 2.0);
@@ -459,15 +659,19 @@ export function generate(
       lid = plate;
     }
 
-    const lidSmoothed = finishMesh(lid, Math.floor(FINAL_TRI_BUDGET / 3));
-    const lidFinal = release(lidSmoothed);
+    const lidSmoothed = finishMesh(lid, Math.floor(triBudget / 3));
+    const lidReleased = release(lidSmoothed);
+    const lidFinal =
+      shrink !== 1 ? lidReleased.scale([shrink, shrink, shrink]) : lidReleased;
+    if (lidFinal !== lidReleased) lidReleased.delete();
+    lidVolume = lidFinal.volume();
     const lidMesh = lidFinal.getMesh();
     lidPart = meshToPart(lidMesh);
     lidTriangles = lidPart.triangleCount;
     lidFinal.delete();
   }
 
-  const topology = analyzeTopology(bodyPart.indices);
+  const topology = analyzeTopology(bodyPart.positions, bodyPart.indices, topZ);
   const outerDims = bbox(bodyPart.positions);
   // Minimum cutout the walls must pass through (widest point: taper + surfacing).
   const maxTaper = Math.max(0, taperTop);
@@ -484,13 +688,23 @@ export function generate(
     stats: {
       bodyTriangles: bodyPart.triangleCount,
       lidTriangles,
+      bodyVolume,
+      lidVolume,
       outerDims,
       cutout,
-      watertight,
+      watertight:
+        watertight &&
+        topology.nonManifoldEdges === 0 &&
+        topology.defectEdges === 0,
       nakedEdges: topology.nakedEdges,
+      rimEdges: topology.rimEdges,
+      defectEdges: topology.defectEdges,
+      nonManifoldEdges: topology.nonManifoldEdges,
       genMs: performance.now() - t0,
       effectiveAmplitude,
       densityClamped,
+      smoothingClamped,
+      preview: isPreview,
     },
   };
 }

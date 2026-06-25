@@ -3,22 +3,26 @@
 // promise chain so generate() is never called concurrently (WASM is not reentrant).
 
 import { generate } from "./engine";
-import { getManifold } from "./manifoldModule";
-import type { GeneratedGeometry, GeneratedPart, ReceptacleParams } from "../types";
+import { getManifold, prefetchManifold } from "./manifoldModule";
+import type { GeneratedGeometry, GeneratedPart, GenerateQuality, ReceptacleParams } from "../types";
 
 export interface WorkerRequest {
   id: number;
   params: ReceptacleParams;
+  quality?: GenerateQuality;
 }
 
 export type WorkerResponse =
-  | { id: number; ok: true; geometry: GeneratedGeometry; params: ReceptacleParams }
+  | { id: number; ok: true; geometry: GeneratedGeometry; params: ReceptacleParams; quality: GenerateQuality }
   | { id: number; ok: false; error: string };
 
 const ctx: {
   onmessage: ((ev: MessageEvent<WorkerRequest>) => void) | null;
   postMessage: (msg: WorkerResponse, transfer?: Transferable[]) => void;
 } = self as never;
+
+// Start WASM download as soon as the worker boots — overlaps with first request.
+prefetchManifold();
 
 function clonePart(part: GeneratedPart): GeneratedPart {
   return {
@@ -47,21 +51,25 @@ function transferList(geometry: GeneratedGeometry): Transferable[] {
   return [...buffers];
 }
 
-/** Latest request waiting while a generation is in flight (latest-wins). */
-let pending: WorkerRequest | null = null;
+/** Latest preview waiting while work is in flight (latest-wins). */
+let pendingPreview: WorkerRequest | null = null;
+/** Latest full export waiting — always drained before preview. */
+let pendingFull: WorkerRequest | null = null;
 /** Serializes all WASM work — never overlap generate() calls. */
 let chain: Promise<void> = Promise.resolve();
 
 async function drainQueue(): Promise<void> {
-  while (pending) {
-    const req = pending;
-    pending = null;
+  while (pendingFull || pendingPreview) {
+    const req = pendingFull ?? pendingPreview!;
+    if (pendingFull === req) pendingFull = null;
+    else pendingPreview = null;
     try {
       const wasm = await getManifold();
-      const geometry = generate(wasm, req.params);
+      const quality = req.quality ?? "full";
+      const geometry = generate(wasm, req.params, { quality });
       const outgoing = cloneGeometry(geometry);
       ctx.postMessage(
-        { id: req.id, ok: true, geometry: outgoing, params: req.params },
+        { id: req.id, ok: true, geometry: outgoing, params: req.params, quality },
         transferList(outgoing),
       );
     } catch (e) {
@@ -75,6 +83,11 @@ async function drainQueue(): Promise<void> {
 }
 
 ctx.onmessage = (ev: MessageEvent<WorkerRequest>) => {
-  pending = ev.data;
+  const req = ev.data;
+  if ((req.quality ?? "full") === "full") {
+    pendingFull = req;
+  } else {
+    pendingPreview = req;
+  }
   chain = chain.then(drainQueue);
 };

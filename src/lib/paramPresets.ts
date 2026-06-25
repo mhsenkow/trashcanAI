@@ -9,6 +9,7 @@ export type BuiltinPresetId =
   | "smooth-planter"
   | "aero-dashboard"
   | "knurl-grip"
+  | "hex-honey"
   | "organic-cells";
 
 export interface BuiltinPreset {
@@ -81,7 +82,6 @@ export const BUILTIN_PRESETS: BuiltinPreset[] = [
       amplitude: 0,
       includeLid: false,
       flangeWidth: 0,
-      bottomFillet: 6,
     }),
     chip: "Smooth",
   },
@@ -112,15 +112,29 @@ export const BUILTIN_PRESETS: BuiltinPreset[] = [
     chip: "Knurl",
   },
   {
+    id: "hex-honey",
+    name: "Hex honeycomb",
+    description: "Raised hex nubs — tactile honeycomb bosses",
+    params: p({
+      surfacing: "hex",
+      amplitude: 0.6,
+      featureScale: 3.8,
+      sharpness: 0.78,
+      distortion: 0,
+      includeLid: false,
+    }),
+    chip: "Hex",
+  },
+  {
     id: "organic-cells",
     name: "Organic cells",
     description: "Voronoi pebble skin",
     params: p({
       surfacing: "cells",
-      amplitude: 0.7,
-      featureScale: 5,
-      distortion: 0.25,
-      sharpness: 0.4,
+      amplitude: 0.65,
+      featureScale: 4.5,
+      distortion: 0.12,
+      sharpness: 0.68,
     }),
     chip: "Cells",
   },
@@ -136,6 +150,7 @@ const ARCHETYPE_BY_SURFACING: Partial<Record<ReceptacleParams["surfacing"], Buil
   smooth: "smooth-planter",
   ribbing: "aero-dashboard",
   knurling: "knurl-grip",
+  hex: "hex-honey",
   cells: "organic-cells",
 };
 

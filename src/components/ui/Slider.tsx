@@ -11,6 +11,9 @@ interface SliderProps {
   step: number;
   unit?: string;
   disabled?: boolean;
+  invalid?: boolean;
+  /** Suggested values — rendered as subtle ticks on the track. */
+  marks?: number[];
   onChange: (value: number) => void;
   format?: (value: number) => string;
 }
@@ -36,6 +39,8 @@ export function Slider({
   step,
   unit = "mm",
   disabled = false,
+  invalid = false,
+  marks,
   onChange,
   format,
 }: SliderProps) {
@@ -77,10 +82,17 @@ export function Slider({
     );
   };
 
+  const markPct = (m: number) =>
+    max > min ? `${((clampStep(m, min, max, step) - min) / (max - min)) * 100}%` : "0%";
+
   return (
     <div className={disabled ? "opacity-40 pointer-events-none" : ""}>
       <div className="flex items-center justify-between gap-2 mb-1.5">
-        <label className="text-[11px] uppercase tracking-wider text-zinc-400 shrink-0">
+        <label
+          className={`text-[11px] uppercase tracking-wider shrink-0 ${
+            invalid ? "text-red-400" : "text-zinc-400"
+          }`}
+        >
           {label}
         </label>
         <div className="flex items-center gap-1 min-w-0">
@@ -88,6 +100,7 @@ export function Slider({
             type="text"
             inputMode="decimal"
             aria-label={`${label} value`}
+            aria-invalid={invalid}
             value={draft}
             disabled={disabled}
             onChange={(e) => handleType(e.target.value)}
@@ -97,7 +110,11 @@ export function Slider({
                 e.currentTarget.blur();
               }
             }}
-            className="w-[5.25rem] rounded-md border border-zinc-700/80 bg-zinc-900/80 px-2 py-1.5 text-right font-mono text-base text-zinc-100 tabular-nums outline-none focus:border-[var(--accent)]/50"
+            className={`w-[5.25rem] rounded-md border bg-zinc-900/80 px-2 py-1.5 text-right font-mono text-base tabular-nums outline-none ${
+              invalid
+                ? "border-red-500/70 text-red-300 focus:border-red-400/80"
+                : "border-zinc-700/80 text-zinc-100 focus:border-[var(--accent)]/50"
+            }`}
           />
           {!format && (
             <span className="text-xs font-mono text-zinc-500 w-5 shrink-0">{unit}</span>
@@ -114,11 +131,27 @@ export function Slider({
         onValueChange={([v]) => onChange(v)}
       >
         <RSlider.Track className="relative grow rounded-full h-[3px] bg-zinc-800">
-          <RSlider.Range className="absolute h-full rounded-full bg-[var(--accent)]" />
+          {marks?.map((m, i) => (
+            <span
+              key={`${label}-mark-${i}`}
+              className="pointer-events-none absolute top-1/2 -translate-y-1/2 w-0.5 h-2 rounded-full bg-zinc-600/80"
+              style={{ left: markPct(m) }}
+              aria-hidden
+            />
+          ))}
+          <RSlider.Range
+            className={`absolute h-full rounded-full ${
+              invalid ? "bg-red-500" : "bg-[var(--accent)]"
+            }`}
+          />
         </RSlider.Track>
         <RSlider.Thumb
           aria-label={label}
-          className="block w-3.5 h-3.5 rounded-full bg-zinc-100 shadow-md border border-zinc-400/40 outline-none transition-transform hover:scale-110 focus-visible:ring-2 focus-visible:ring-[var(--accent)] cursor-grab active:cursor-grabbing"
+          className={`block w-3.5 h-3.5 rounded-full shadow-md outline-none transition-transform hover:scale-110 focus-visible:ring-2 cursor-grab active:cursor-grabbing ${
+            invalid
+              ? "bg-red-200 border border-red-400/60 focus-visible:ring-red-400/50"
+              : "bg-zinc-100 border border-zinc-400/40 focus-visible:ring-[var(--accent)]"
+          }`}
         />
       </RSlider.Root>
     </div>
