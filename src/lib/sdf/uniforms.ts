@@ -17,6 +17,7 @@ export function stateToUniforms(st: SdfSceneState): Record<string, { value: numb
     uInnerR: { value: st.innerR },
     uCavityCenterZ: { value: st.cavityCenterZ },
     uCavityHalfH: { value: st.cavityHalfH },
+    uCavityFloorZ: { value: st.cavityFloorZ },
     uEdgeSize: { value: st.edgeSize },
     uEdgeType: { value: EDGE_TYPE_TO_FLOAT[st.edgeType] },
     uInnerEdgeSize: { value: st.innerEdgeSize },

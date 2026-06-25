@@ -16,6 +16,7 @@ interface SliderProps {
   marks?: number[];
   onChange: (value: number) => void;
   format?: (value: number) => string;
+  title?: string;
 }
 
 function decimalsForStep(step: number): number {
@@ -43,6 +44,7 @@ export function Slider({
   marks,
   onChange,
   format,
+  title,
 }: SliderProps) {
   const [draft, setDraft] = useState(String(value));
   const dec = decimalsForStep(step);
@@ -92,6 +94,7 @@ export function Slider({
           className={`text-[11px] uppercase tracking-wider shrink-0 ${
             invalid ? "text-red-400" : "text-zinc-400"
           }`}
+          title={title}
         >
           {label}
         </label>
@@ -108,6 +111,12 @@ export function Slider({
             onKeyDown={(e) => {
               if (e.key === "Enter") {
                 e.currentTarget.blur();
+                return;
+              }
+              if (e.key === "ArrowUp" || e.key === "ArrowDown") {
+                e.preventDefault();
+                const dir = e.key === "ArrowUp" ? 1 : -1;
+                onChange(clampStep(value + dir * step, min, max, step));
               }
             }}
             className={`w-[5.25rem] rounded-md border bg-zinc-900/80 px-2 py-1.5 text-right font-mono text-base tabular-nums outline-none ${

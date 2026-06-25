@@ -33,7 +33,8 @@ export function sdExtrudedRoundRect(
 }
 
 function outerHalfExtents(z: number, st: SdfSceneState) {
-  const dr = draftOnlyGrow(z, st.H, st.draftTan);
+  const zg = Math.max(0, z);
+  const dr = draftOnlyGrow(zg, st.H, st.draftTan);
   return {
     hl: st.halfL + dr,
     hw: st.halfW + dr,
@@ -42,7 +43,9 @@ function outerHalfExtents(z: number, st: SdfSceneState) {
 }
 
 function innerHalfExtents(z: number, st: SdfSceneState) {
-  const dr = draftOnlyGrow(z, st.H, st.draftTan);
+  const cavityBase = st.cavityCenterZ - st.cavityHalfH;
+  const zg = Math.max(0, z - cavityBase);
+  const dr = draftOnlyGrow(zg, st.H - cavityBase, st.draftTan);
   return {
     hl: st.innerHalfL + dr,
     hw: st.innerHalfW + dr,

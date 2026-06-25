@@ -12,10 +12,12 @@
 import type { CrossSection, Manifold, ManifoldToplevel, Mesh } from "manifold-3d";
 import { clampRadius, perimeterLength, roundedRectPoints } from "./profile";
 import { analyzeTopology } from "./meshAnalysis";
+import { analyzeOverhang } from "./overhangAnalysis";
+import { applyBodyFeatures, cutLidGasket, type FeatureCtx } from "./features";
 import { evaluateBaseEdge, evaluateTopEdge } from "../paramValidation";
 import { amplitudeCapForSurfacing } from "../paramDerivation";
 import { makeWarp } from "./surfacing";
-import { shrinkScale } from "../printProfiles";
+import { elephantFootInset, shrinkScale } from "../printProfiles";
 import type {
   GeneratedGeometry,
   GeneratedPart,
@@ -25,6 +27,8 @@ import type {
 
 export interface GenerateOptions {
   quality?: GenerateQuality;
+  /** Layer height (mm) — drives elephant-foot perimeter relief when foot is sharp. */
+  layerHeight?: number;
 }
 
 // Soft cap on base side-wall vertices so pathological pitch/size combos can't
@@ -198,6 +202,11 @@ export function generate(
   const edgeO = baseEdge.effectiveSize;
   const edgeType = params.baseEdgeType;
   const hasBaseEdge = edgeType !== "none" && edgeO > 0;
+  // Slight inward relief at the floor ring when the foot is sharp (#5).
+  const footRelief =
+    !hasBaseEdge && !params.footRing
+      ? elephantFootInset(options.layerHeight ?? 0.2)
+      : 0;
   const topEdge = evaluateTopEdge(params);
   const topEdgeO = topEdge.effectiveSize;
   const topEdgeType = params.topEdgeType;
@@ -208,9 +217,11 @@ export function generate(
   // rounded corner still survives at the very floor). This is what lets the base
   // fillet/chamfer go large and stay a clean, watertight mesh. The corner slider
   // is the *minimum* vertical radius; a bigger foot edge rounds the box further.
-  const r = hasBaseEdge
-    ? clampRadius(halfL, halfW, Math.max(rUser, edgeO * 1.12))
-    : rUser;
+  const r = params.decoupleVerticalCorners
+    ? rUser
+    : hasBaseEdge
+      ? clampRadius(halfL, halfW, Math.max(rUser, edgeO * 1.12))
+      : rUser;
 
   const isSmooth = params.surfacing === "smooth";
   const pitch = Math.max(0.6, params.featureScale);
@@ -380,12 +391,17 @@ export function generate(
   const topR = hasFlange ? wallTopR + flangeW : wallTopR;
 
   let solid: Manifold = outer;
+  let flangeOuterHalfL = halfL;
+  let flangeOuterHalfW = halfW;
+  let flangeOuterR = r;
+  let flangeSpacing = perimSpacing(halfL, halfW, r, nPerim);
+  let flangeCorners = cornerMinSegs(r, flangeSpacing);
   if (hasFlange) {
-    const flangeOuterHalfL = halfL + flangeW;
-    const flangeOuterHalfW = halfW + flangeW;
-    const flangeOuterR = r + flangeW;
-    const flangeSpacing = perimSpacing(flangeOuterHalfL, flangeOuterHalfW, flangeOuterR, nPerim);
-    const flangeCorners = cornerMinSegs(flangeOuterR, flangeSpacing);
+    flangeOuterHalfL = halfL + flangeW;
+    flangeOuterHalfW = halfW + flangeW;
+    flangeOuterR = r + flangeW;
+    flangeSpacing = perimSpacing(flangeOuterHalfL, flangeOuterHalfW, flangeOuterR, nPerim);
+    flangeCorners = cornerMinSegs(flangeOuterR, flangeSpacing);
     const wallSpacing = perimSpacing(halfL, halfW, r, nPerim);
     const wallCorners = cornerMinSegs(r, wallSpacing);
     const flangeSeg = Math.max(2, Math.ceil(flangeT / Math.min(dzTarget, flangeT / 3)));
@@ -431,7 +447,11 @@ export function generate(
         topEdgeSize: topEdgeO,
         topEdgeZ: H,
         topEdgeBrim: hasFlange,
+        footRelief,
         profileBaseZ: 0,
+        chamferAngle: params.chamferAngle,
+        baseEdgeSides: params.baseEdgeSides,
+        baseEdgeBias: params.baseEdgeBias,
       }),
     ),
   );
@@ -464,8 +484,8 @@ export function generate(
     cavityShrunk.extrude(cavityH, cavitySeg - 1).translate(0, 0, cavityFloorZ),
   );
   cavity = breakCapFans(cavity, keep, discard, 1);
-  // Interior: same draft + base edge as the exterior, measured from the same
-  // global base (profileBaseZ 0) so the wall stays constant-thickness.
+  // Interior: draft + base edge measured from the cavity floor so the
+  // wall–floor junction stays clean (no XY spike at the inner floor).
   const innerEdgeMax = Math.min(innerHalfL, innerHalfW) * 0.48;
   // Inner edge tracks the outer (same profile, same base) so the wall stays
   // constant-thickness through the band — clamped by the inner footprint and the
@@ -512,7 +532,10 @@ export function generate(
             draftTan,
             baseEdgeType: innerEdgeType,
             baseEdgeSize: edgeI,
-            profileBaseZ: 0,
+            profileBaseZ: cavityFloorZ,
+            chamferAngle: params.chamferAngle,
+            baseEdgeSides: params.baseEdgeSides,
+            baseEdgeBias: params.baseEdgeBias,
           },
         ),
       ),
@@ -525,6 +548,46 @@ export function generate(
   discard(shell);
   const bodyFinished = finishMesh(hollow);
   let body = release(bodyFinished);
+
+  // Underside chamfer on the mounting flange — relieves brim overhang (#4).
+  if (hasFlange) {
+    const relief = clamp(flangeT * 0.45, 0.6, 2.5);
+    const scaleTop = Math.max(
+      0.82,
+      1 - relief / Math.max(flangeOuterHalfL, flangeOuterHalfW),
+    );
+    const reliefCS = keep(
+      new CrossSection(
+        roundedRectPoints(
+          flangeOuterHalfL,
+          flangeOuterHalfW,
+          flangeOuterR,
+          flangeSpacing,
+          flangeCorners,
+        ),
+      ),
+    );
+    const wallSpacing = perimSpacing(halfL, halfW, r, nPerim);
+    const wallCorners = cornerMinSegs(r, wallSpacing);
+    const blockCS = keep(
+      new CrossSection(roundedRectPoints(halfL, halfW, r, wallSpacing, wallCorners)),
+    );
+    const wedge = keep(reliefCS.extrude(relief, 3, 0, scaleTop));
+    const block = keep(blockCS.extrude(relief + 2, 1));
+    const cutter = keep(
+      wedge.subtract(block).translate(0, 0, H - relief),
+    );
+    const relieved = body.subtract(cutter);
+    if (relieved.status() === "NoError" && !relieved.isEmpty()) {
+      body.delete();
+      body = relieved;
+    } else {
+      relieved.delete();
+    }
+    discard(wedge);
+    discard(block);
+    discard(cutter);
+  }
 
   // Base-floor options: recess the underside to a perimeter rim (#27) and/or
   // punch drainage holes through the floor (#34). Built as cutters and removed
@@ -580,6 +643,21 @@ export function generate(
       body = drilled;
     }
   }
+
+  const featureCtx: FeatureCtx = {
+    halfL,
+    halfW,
+    innerHalfL,
+    innerHalfW,
+    innerR,
+    H,
+    floorT,
+    topZ,
+    r,
+    t,
+    taperTop,
+  };
+  body = applyBodyFeatures(body, CrossSection, params, featureCtx);
 
   if (body.status() !== "NoError" || body.isEmpty()) {
     body.delete();
@@ -660,7 +738,16 @@ export function generate(
     }
 
     const lidSmoothed = finishMesh(lid, Math.floor(triBudget / 3));
-    const lidReleased = release(lidSmoothed);
+    let lidReleased = release(lidSmoothed);
+    lidReleased = cutLidGasket(
+      lidReleased,
+      CrossSection,
+      params,
+      topHalfL,
+      topHalfW,
+      topR,
+      plateT,
+    );
     const lidFinal =
       shrink !== 1 ? lidReleased.scale([shrink, shrink, shrink]) : lidReleased;
     if (lidFinal !== lidReleased) lidReleased.delete();
@@ -672,6 +759,7 @@ export function generate(
   }
 
   const topology = analyzeTopology(bodyPart.positions, bodyPart.indices, topZ);
+  const overhang = analyzeOverhang(bodyPart.positions, bodyPart.indices);
   const outerDims = bbox(bodyPart.positions);
   // Minimum cutout the walls must pass through (widest point: taper + surfacing).
   const maxTaper = Math.max(0, taperTop);
@@ -679,6 +767,16 @@ export function generate(
     L + 2 * maxTaper + 2 * effectiveAmplitude,
     W + 2 * maxTaper + 2 * effectiveAmplitude,
   ];
+
+  const coveBrimOk =
+    !hasFlange ||
+    topEdgeType === "none" ||
+    topEdgeO <= flangeT * 0.95;
+  const lipH = params.includeLid
+    ? Math.min(Math.max(0, params.lidLipHeight), (H - floorT) * 0.85)
+    : 0;
+  const lidEngagementMm = lipH;
+  const lidInterference = params.lidClearance < 0;
 
   for (const o of garbage) o.delete();
 
@@ -690,6 +788,7 @@ export function generate(
       lidTriangles,
       bodyVolume,
       lidVolume,
+      nominalDims: [L, W, H],
       outerDims,
       cutout,
       watertight:
@@ -705,6 +804,10 @@ export function generate(
       densityClamped,
       smoothingClamped,
       preview: isPreview,
+      overhang,
+      lidEngagementMm,
+      lidInterference,
+      coveBrimOk,
     },
   };
 }

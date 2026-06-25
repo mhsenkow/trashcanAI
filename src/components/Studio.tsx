@@ -1,10 +1,14 @@
 "use client";
 
 import dynamic from "next/dynamic";
+import { useEffect } from "react";
 import { useGeometry } from "@/lib/useGeometry";
+import { selectParams, useParamStore } from "@/lib/store";
+import { decodeParamsFromQuery } from "@/lib/paramShare";
 import { MengerLoader } from "./MengerLoader";
 import { Sidebar } from "./Sidebar";
-import { ViewCube } from "./ViewControls";
+import { ViewCube, ViewPreviewToggles } from "./ViewControls";
+import { BboxOverlay } from "./BboxOverlay";
 
 const Viewport = dynamic(() => import("./Viewport"), {
   ssr: false,
@@ -12,11 +16,37 @@ const Viewport = dynamic(() => import("./Viewport"), {
 
 export default function Studio() {
   const geo = useGeometry();
+  const loadParams = useParamStore((s) => s.loadParams);
+  const undo = useParamStore((s) => s.undo);
+  const redo = useParamStore((s) => s.redo);
+
+  useEffect(() => {
+    const patch = decodeParamsFromQuery(window.location.search);
+    if (patch) loadParams({ ...selectParams(useParamStore.getState()), ...patch });
+  }, [loadParams]);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const mod = e.metaKey || e.ctrlKey;
+      if (!mod) return;
+      if (e.key === "z" && !e.shiftKey) {
+        e.preventDefault();
+        undo();
+      }
+      if (e.key === "z" && e.shiftKey) {
+        e.preventDefault();
+        redo();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [undo, redo]);
 
   return (
     <div className="h-full w-full flex bg-[#0a0b0d]">
       <div className="relative flex-1 min-w-0">
         <Viewport geometry={geo.geometry} generation={geo.generation} />
+        <BboxOverlay geometry={geo.geometry} />
 
         <div className="pointer-events-none absolute inset-x-0 top-0 flex items-start justify-between gap-3 p-4">
           <div className="flex items-center gap-2 rounded-md bg-black/40 backdrop-blur px-2.5 py-1.5 border border-white/5 w-fit">
@@ -44,8 +74,9 @@ export default function Studio() {
           </span>
         </div>
 
-        <div className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2">
+        <div className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 flex flex-col gap-3">
           <ViewCube />
+          <ViewPreviewToggles />
         </div>
 
         {geo.status === "loading" && !geo.geometry && (

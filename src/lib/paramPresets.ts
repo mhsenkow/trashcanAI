@@ -146,12 +146,23 @@ export const SIZE_CHIPS: { label: string; presetId: BuiltinPresetId }[] = [
   { label: "L", presetId: "large" },
 ];
 
+/** Goal-based starting bundles (#50). */
+export const DESIGN_INTENTS: { id: string; label: string; description: string; presetId: BuiltinPresetId }[] = [
+  { id: "panel", label: "Panel insert", description: "Flanged drop-in with lid", presetId: "default" },
+  { id: "planter", label: "Planter", description: "Smooth, drainage-friendly", presetId: "smooth-planter" },
+  { id: "grip", label: "Grip bin", description: "Knurled exterior", presetId: "knurl-grip" },
+  { id: "aero", label: "Ventilated", description: "Ribbed + scoop-friendly depth", presetId: "aero-dashboard" },
+];
+
 const ARCHETYPE_BY_SURFACING: Partial<Record<ReceptacleParams["surfacing"], BuiltinPresetId>> = {
   smooth: "smooth-planter",
   ribbing: "aero-dashboard",
   knurling: "knurl-grip",
   hex: "hex-honey",
   cells: "organic-cells",
+  noise: "organic-cells",
+  waves: "aero-dashboard",
+  weave: "knurl-grip",
 };
 
 /** Surfacing-only slice of a built-in preset (no size / flange / lid side effects). */

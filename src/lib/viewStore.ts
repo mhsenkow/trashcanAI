@@ -7,15 +7,23 @@ interface ViewStore {
   /** Bumped when a named preset is requested. */
   viewNonce: number;
   activePreset: ViewPreset | null;
+  /** Color mesh by FDM overhang severity (#3). */
+  overhangHeatmap: boolean;
+  /** Seat lid on the rim instead of exploded preview (#41). */
+  lidInPlace: boolean;
   reframe: () => void;
   setView: (preset: ViewPreset) => void;
   clearActivePreset: () => void;
+  toggleOverhangHeatmap: () => void;
+  toggleLidInPlace: () => void;
 }
 
 export const useViewStore = create<ViewStore>((set) => ({
   frameNonce: 0,
   viewNonce: 0,
   activePreset: null,
+  overhangHeatmap: false,
+  lidInPlace: false,
   reframe: () =>
     set((s) => ({
       activePreset: "iso",
@@ -28,4 +36,6 @@ export const useViewStore = create<ViewStore>((set) => ({
       viewNonce: s.viewNonce + 1,
     })),
   clearActivePreset: () => set({ activePreset: null }),
+  toggleOverhangHeatmap: () => set((s) => ({ overhangHeatmap: !s.overhangHeatmap })),
+  toggleLidInPlace: () => set((s) => ({ lidInPlace: !s.lidInPlace })),
 }));

@@ -1,44 +1,65 @@
 "use client";
 
-// Finalises a generated part into a binary STL and triggers a browser download.
-// The mesh is already watertight (manifold guarantees it); we only need to wrap
-// the buffers in a THREE.Mesh for the exporter.
+// Re-exports mesh prep + STL; multi-format lives in exportFormats.ts.
 
 import * as THREE from "three";
 import { mergeVertices, toCreasedNormals } from "three-stdlib";
-import { STLExporter } from "three-stdlib";
+import { overhangColorsForGeometry } from "./geometry/overhangAnalysis";
+import { wallThicknessColors } from "./geometry/wallThicknessAnalysis";
 import type { GeneratedPart } from "./types";
 
-export function partToBufferGeometry(part: GeneratedPart): THREE.BufferGeometry {
+export { exportPartToStl, exportPartTo3mf, exportPartToStep, exportToleranceStrip, exportTiledStl } from "./exportFormats";
+
+export function partToBufferGeometry(
+  part: GeneratedPart,
+  options?: {
+    overhangHeatmap?: boolean;
+    wallHeatmap?: boolean;
+    wallT?: number;
+    halfL?: number;
+    halfW?: number;
+    layerStepMm?: number;
+  },
+): THREE.BufferGeometry {
   const positions = new Float32Array(part.positions);
   const indices = new Uint32Array(part.indices);
   const geom = new THREE.BufferGeometry();
   geom.setAttribute("position", new THREE.BufferAttribute(positions, 3));
   geom.setIndex(new THREE.BufferAttribute(indices, 1));
-  // Manifold emits split verts per triangle; weld + creased normals for clean shading.
   const welded = mergeVertices(geom, 1e-4);
   geom.dispose();
   const creased = toCreasedNormals(welded, Math.PI / 4);
   welded.dispose();
+
+  const posAttr = creased.getAttribute("position") as THREE.BufferAttribute;
+  const posArr = posAttr.array as Float32Array;
+  if (options?.layerStepMm && options.layerStepMm > 0) {
+    for (let i = 2; i < posArr.length; i += 3) {
+      posArr[i] = Math.round(posArr[i] / options.layerStepMm) * options.layerStepMm;
+    }
+    posAttr.needsUpdate = true;
+  }
+
+  const idx = creased.getIndex();
+  if (idx) {
+    if (options?.overhangHeatmap) {
+      const colors = overhangColorsForGeometry(posArr, idx.array as Uint32Array);
+      creased.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+    } else if (
+      options?.wallHeatmap &&
+      options.wallT &&
+      options.halfL &&
+      options.halfW
+    ) {
+      const colors = wallThicknessColors(
+        posArr,
+        options.halfL,
+        options.halfW,
+        options.wallT,
+      );
+      creased.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+    }
+  }
+
   return creased;
-}
-
-export function exportPartToStl(part: GeneratedPart, filename: string): void {
-  const geom = partToBufferGeometry(part);
-  const mesh = new THREE.Mesh(geom);
-  const exporter = new STLExporter();
-  const result = exporter.parse(mesh, { binary: true }) as unknown as DataView;
-
-  const blob = new Blob([result as BlobPart], {
-    type: "application/octet-stream",
-  });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filename.endsWith(".stl") ? filename : `${filename}.stl`;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  URL.revokeObjectURL(url);
-  geom.dispose();
 }

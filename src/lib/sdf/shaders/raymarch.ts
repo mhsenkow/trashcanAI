@@ -30,6 +30,7 @@ uniform float uInnerHalfW;
 uniform float uInnerR;
 uniform float uCavityCenterZ;
 uniform float uCavityHalfH;
+uniform float uCavityFloorZ;
 uniform float uFlangeW;
 uniform float uFlangeT;
 uniform float uTopHalfL;
@@ -106,7 +107,8 @@ float outerBox(vec3 p) {
 }
 
 float cavity(vec3 p) {
-  float dr = profileRadial(p.z, uInnerEdgeSize, uEdgeType, uDraftTan);
+  float zg = max(0.0, p.z - uCavityFloorZ);
+  float dr = profileRadial(zg, uInnerEdgeSize, uEdgeType, uDraftTan);
   return sdExtrudedRR(
     p,
     uInnerHalfL + dr, uInnerHalfW + dr, max(0.1, uInnerR + dr),
@@ -176,7 +178,29 @@ float surfField(vec3 p, float s) {
       ? 0.5 - 0.5 * cos(2.0 * PI * u)
       : 0.5 - 0.5 * cos(2.0 * PI * v);
   }
+  if (uSurfType < 2.5) {
+    float tu = 1.0 - 2.0 * abs(fract(u + v) - 0.5);
+    float tv = 1.0 - 2.0 * abs(fract(u - v) - 0.5);
+    return tu * tv;
+  }
   if (uSurfType < 3.5) return 0.5 + 0.5 * hash(p / uPitch);
+  if (uSurfType < 4.5) {
+    float a1 = cos(2.0 * PI * u);
+    float a2 = cos(2.0 * PI * (0.5 * u + 0.8660254 * v));
+    float a3 = cos(2.0 * PI * (0.5 * u - 0.8660254 * v));
+    return (a1 + a2 + a3 + 1.5) / 4.5;
+  }
+  if (uSurfType < 5.5) return 0.5 + 0.5 * hash(vec3(u, v, p.z * 0.02));
+  if (uSurfType < 6.5) {
+    float flow = 0.6 * sin(2.0 * PI * v * 0.25);
+    return 0.5 + 0.5 * sin(2.0 * PI * (u + flow));
+  }
+  if (uSurfType < 7.5) {
+    float over = mod(floor(u) + floor(v), 2.0) < 0.5 ? 1.0 : 0.0;
+    float barU = 1.0 - 4.0 * (fract(u) - 0.5) * (fract(u) - 0.5);
+    float barV = 1.0 - 4.0 * (fract(v) - 0.5) * (fract(v) - 0.5);
+    return over > 0.5 ? barV : barU;
+  }
   return 0.0;
 }
 
@@ -287,4 +311,4 @@ export const SURFACING_TO_FLOAT: Record<string, number> = {
   weave: 7,
 };
 
-export const EDGE_TYPE_TO_FLOAT = { none: 0, fillet: 1, chamfer: 2 } as const;
+export const EDGE_TYPE_TO_FLOAT = { none: 0, fillet: 1, chamfer: 2, bead: 3 } as const;

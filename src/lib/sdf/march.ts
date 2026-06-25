@@ -179,6 +179,7 @@ export function exportSdfGeometry(
       lidTriangles,
       bodyVolume: 0,
       lidVolume: 0,
+      nominalDims: [params.length, params.width, params.height],
       outerDims: [maxX - minX, maxY - minY, maxZ - minZ],
       cutout: [
         params.length + 2 * st.taperTop + 2 * st.amplitude,

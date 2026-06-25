@@ -1,13 +1,7 @@
 "use client";
 
-// The interactive 3D viewport. Renders the generated body (and exploded lid)
-// with a studio-lit, lightly anodized material and a filmic post chain so the
-// algorithmic surfacing reads photographically — ambient occlusion in the
-// grooves and cavity does most of the realism work. Z-up geometry is rotated
-// into the scene's Y-up world so the part rests on the "build plate" grid.
-
 import { useEffect, useMemo, useRef } from "react";
-import { Canvas, useThree } from "@react-three/fiber";
+import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import {
   ContactShadows,
   Environment,
@@ -23,9 +17,14 @@ import {
   Vignette,
 } from "@react-three/postprocessing";
 import { ToneMappingMode } from "postprocessing";
+import * as THREE from "three";
 import { partToBufferGeometry } from "@/lib/exportStl";
 import { cameraForPreset } from "@/lib/viewPresets";
 import { useViewStore } from "@/lib/viewStore";
+import { useUiStore } from "@/lib/uiStore";
+import { useParamStore } from "@/lib/store";
+import { usePrinterStore } from "@/lib/printStore";
+import { MATERIALS, type MaterialId } from "@/lib/printProfiles";
 import type { GeneratedGeometry, GeneratedPart } from "@/lib/types";
 
 function minZ(positions: Float32Array): number {
@@ -38,31 +37,72 @@ function PartMesh({
   part,
   zOffset = 0,
   accent = false,
+  ghost = false,
+  overhangHeatmap = false,
+  wallHeatmap = false,
+  wallT = 1,
+  halfL = 100,
+  halfW = 70,
+  layerStepMm = 0,
+  clipPlane = null as THREE.Plane | null,
+  materialColor = "#bac0c8",
+  materialRoughness = 0.42,
+  materialPreview = true,
 }: {
   part: GeneratedPart;
   zOffset?: number;
   accent?: boolean;
+  ghost?: boolean;
+  overhangHeatmap?: boolean;
+  wallHeatmap?: boolean;
+  wallT?: number;
+  halfL?: number;
+  halfW?: number;
+  layerStepMm?: number;
+  clipPlane?: THREE.Plane | null;
+  materialColor?: string;
+  materialRoughness?: number;
+  materialPreview?: boolean;
 }) {
-  const geometry = useMemo(() => partToBufferGeometry(part), [part]);
+  const geometry = useMemo(
+    () =>
+      partToBufferGeometry(part, {
+        overhangHeatmap,
+        wallHeatmap,
+        wallT,
+        halfL,
+        halfW,
+        layerStepMm,
+      }),
+    [part, overhangHeatmap, wallHeatmap, wallT, halfL, halfW, layerStepMm],
+  );
   useEffect(() => () => geometry.dispose(), [geometry]);
+
+  const vertexColors =
+    (overhangHeatmap || wallHeatmap) && !!geometry.getAttribute("color");
+  const useFilament = materialPreview && !vertexColors;
 
   return (
     <mesh geometry={geometry} position={[0, 0, zOffset]} castShadow receiveShadow>
       <meshPhysicalMaterial
-        color={accent ? "#8d949d" : "#bac0c8"}
-        metalness={0.68}
-        roughness={0.42}
-        clearcoat={0.4}
+        vertexColors={vertexColors}
+        color={vertexColors ? "#ffffff" : useFilament ? materialColor : accent ? "#8d949d" : "#bac0c8"}
+        metalness={useFilament ? 0.08 : vertexColors ? 0.15 : 0.68}
+        roughness={useFilament ? materialRoughness : vertexColors ? 0.55 : 0.42}
+        clearcoat={ghost ? 0.15 : useFilament ? 0.12 : 0.4}
         clearcoatRoughness={0.32}
-        envMapIntensity={1.1}
+        envMapIntensity={useFilament ? 0.45 : vertexColors ? 0.35 : 1.1}
+        transparent={ghost}
+        opacity={ghost ? 0.42 : 1}
+        depthWrite={!ghost}
+        clipShadows={false}
+        {...(clipPlane ? { clippingPlanes: [clipPlane] } : {})}
       />
     </mesh>
   );
 }
 
 function StudioEnvironment() {
-  // A self-contained environment (no network fetch) for crisp metal reflections:
-  // a key softbox, an overhead strip, warm/cool rims, and a circular catch-light.
   return (
     <Environment resolution={512} frames={1}>
       <color attach="background" args={["#0b0d11"]} />
@@ -80,14 +120,16 @@ type MinimalControls = {
   update: () => void;
 } | null;
 
-/** Applies iso framing or a named orthographic preset when requested from the UI. */
 function CameraRig({ maxDim, bodyHeight }: { maxDim: number; bodyHeight: number }) {
   const frameNonce = useViewStore((s) => s.frameNonce);
   const viewNonce = useViewStore((s) => s.viewNonce);
   const activePreset = useViewStore((s) => s.activePreset);
+  const autoOrbit = useUiStore((s) => s.autoOrbit);
   const camera = useThree((s) => s.camera);
   const controls = useThree((s) => s.controls) as MinimalControls;
   const dims = useRef({ maxDim, bodyHeight });
+  const t0 = useRef(0);
+
   useEffect(() => {
     dims.current = { maxDim, bodyHeight };
   }, [maxDim, bodyHeight]);
@@ -106,7 +148,36 @@ function CameraRig({ maxDim, bodyHeight }: { maxDim: number; bodyHeight: number 
     }
   }, [frameNonce, viewNonce, activePreset, camera, controls]);
 
+  useFrame((state) => {
+    if (!autoOrbit) return;
+    t0.current += state.clock.getDelta();
+    const d = dims.current.maxDim * 1.9 + 30;
+    const a = t0.current * 0.22;
+    camera.position.x = Math.cos(a) * d;
+    camera.position.z = Math.sin(a) * d;
+    camera.lookAt(0, dims.current.bodyHeight * 0.42, 0);
+  });
+
   return null;
+}
+
+function LidAnimator({
+  baseZ,
+  animate,
+  children,
+}: {
+  baseZ: number;
+  animate: boolean;
+  children: React.ReactNode;
+}) {
+  const ref = useRef<THREE.Group>(null);
+  useFrame((state) => {
+    if (!ref.current) return;
+    ref.current.position.z = animate
+      ? baseZ + Math.sin(state.clock.elapsedTime * 1.2) * 8 + 4
+      : baseZ;
+  });
+  return <group ref={ref}>{children}</group>;
 }
 
 export default function Viewport({
@@ -122,17 +193,45 @@ export default function Viewport({
     : 100;
   const camDist = maxDim * 1.7 + 30;
   const visibleGap = Math.max(10, bodyHeight * 0.2);
-  const lidZOffset = geometry?.lid
-    ? bodyHeight + visibleGap - minZ(geometry.lid.positions)
-    : 0;
   const clearActivePreset = useViewStore((s) => s.clearActivePreset);
+  const overhangHeatmap = useViewStore((s) => s.overhangHeatmap);
+  const lidInPlace = useViewStore((s) => s.lidInPlace);
+  const layerStepPreview = useUiStore((s) => s.layerStepPreview);
+  const clipEnabled = useUiStore((s) => s.clipEnabled);
+  const clipHeight = useUiStore((s) => s.clipHeight);
+  const wallHeatmap = useUiStore((s) => s.wallHeatmap);
+  const materialPreview = useUiStore((s) => s.materialPreview);
+  const lidAnimate = useUiStore((s) => s.lidAnimate);
+  const material = useParamStore((s) => s.material);
+  const wallT = useParamStore((s) => s.wallThickness);
+  const length = geometry?.stats.nominalDims[0] ?? useParamStore.getState().length;
+  const width = geometry?.stats.nominalDims[1] ?? useParamStore.getState().width;
+  const height = geometry?.stats.nominalDims[2] ?? useParamStore.getState().height;
+  const layerHeight = usePrinterStore((s) => s.layerHeight);
+  const mat = MATERIALS[material as MaterialId] ?? MATERIALS.pla;
+
+  const lidSeatZ = geometry?.lid ? bodyHeight - minZ(geometry.lid.positions) : 0;
+  const lidZOffset = geometry?.lid
+    ? lidInPlace
+      ? lidSeatZ
+      : lidSeatZ + visibleGap
+    : 0;
+
+  const clipPlane = useMemo(() => {
+    if (!clipEnabled) return null;
+    const z = clipHeight * bodyHeight;
+    return new THREE.Plane(new THREE.Vector3(0, 0, -1), z);
+  }, [clipEnabled, clipHeight, bodyHeight]);
+
+  const halfL = length / 2;
+  const halfW = width / 2;
 
   return (
     <Canvas
       flat
       shadows
       dpr={[1, 2]}
-      gl={{ antialias: false, preserveDrawingBuffer: false }}
+      gl={{ antialias: false, preserveDrawingBuffer: false, localClippingEnabled: clipEnabled }}
       camera={{ position: [camDist, camDist * 0.78, camDist], fov: 40, near: 1, far: maxDim * 40 }}
     >
       <color attach="background" args={["#0a0b0d"]} />
@@ -145,8 +244,35 @@ export default function Viewport({
       <StudioEnvironment />
 
       <group key={generation} rotation={[-Math.PI / 2, 0, 0]}>
-        {geometry && <PartMesh part={geometry.body} />}
-        {geometry?.lid && <PartMesh part={geometry.lid} zOffset={lidZOffset} accent />}
+        {geometry && (
+          <PartMesh
+            part={geometry.body}
+            overhangHeatmap={overhangHeatmap}
+            wallHeatmap={wallHeatmap}
+            wallT={wallT}
+            halfL={halfL}
+            halfW={halfW}
+            layerStepMm={layerStepPreview ? layerHeight : 0}
+            clipPlane={clipPlane}
+            materialColor={mat.previewColor}
+            materialRoughness={mat.previewRoughness}
+            materialPreview={materialPreview}
+          />
+        )}
+        {geometry?.lid && (
+          <LidAnimator baseZ={lidZOffset} animate={lidAnimate && lidInPlace}>
+            <PartMesh
+              part={geometry.lid}
+              accent
+              ghost={lidInPlace}
+              overhangHeatmap={overhangHeatmap}
+              clipPlane={clipPlane}
+              materialColor={mat.previewColor}
+              materialRoughness={mat.previewRoughness}
+              materialPreview={materialPreview}
+            />
+          </LidAnimator>
+        )}
       </group>
 
       <ContactShadows
@@ -186,12 +312,14 @@ export default function Viewport({
       />
       <CameraRig maxDim={maxDim} bodyHeight={bodyHeight} />
 
-      <EffectComposer multisampling={4} enableNormalPass>
-        <N8AO aoRadius={5} distanceFalloff={1} intensity={2.6} quality="medium" color="black" />
-        <Bloom intensity={0.22} luminanceThreshold={1.0} luminanceSmoothing={0.3} mipmapBlur />
-        <Vignette offset={0.32} darkness={0.5} />
-        <ToneMapping mode={ToneMappingMode.ACES_FILMIC} />
-      </EffectComposer>
+      {geometry && (
+        <EffectComposer multisampling={4}>
+          <N8AO aoRadius={5} distanceFalloff={1} intensity={2.6} quality="medium" color="black" />
+          <Bloom intensity={0.22} luminanceThreshold={1.0} luminanceSmoothing={0.3} mipmapBlur />
+          <Vignette offset={0.32} darkness={0.5} />
+          <ToneMapping mode={ToneMappingMode.ACES_FILMIC} />
+        </EffectComposer>
+      )}
     </Canvas>
   );
 }

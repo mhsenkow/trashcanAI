@@ -15,6 +15,7 @@ export function edgeRadialInset(
   zg: number,
   edgeType: BaseEdgeType,
   edgeSize: number,
+  chamferAngleDeg = 45,
 ): number {
   const F = edgeSize;
   if (F <= 0 || edgeType === "none" || zg < 0) return 0;
@@ -23,8 +24,14 @@ export function edgeRadialInset(
     const dz = F - zg;
     return F - Math.sqrt(F * F - dz * dz);
   }
-  // Chamfer: flat 45° cut — inset grows linearly toward the floor.
-  return F - zg;
+  if (edgeType === "bead") {
+    const t = zg / F;
+    return -0.28 * F * Math.sin(t * Math.PI);
+  }
+  const ref = Math.tan((45 * Math.PI) / 180);
+  const tan = Math.tan((chamferAngleDeg * Math.PI) / 180) || ref;
+  const slope = ref / tan;
+  return (F - zg) * slope;
 }
 
 /** @deprecated Use edgeRadialInset — kept for scripts importing the old name. */
@@ -48,8 +55,12 @@ export function profileRadialOffset(
   edgeType: BaseEdgeType,
   edgeSize: number,
   draftTan: number,
+  chamferAngleDeg = 45,
 ): number {
-  return draftRadialOffset(zg, draftTan, edgeSize) - edgeRadialInset(zg, edgeType, edgeSize);
+  return (
+    draftRadialOffset(zg, draftTan, edgeSize) -
+    edgeRadialInset(zg, edgeType, edgeSize, chamferAngleDeg)
+  );
 }
 
 /** Max base-edge size on the interior wall (manifold cavity warp clamp). */

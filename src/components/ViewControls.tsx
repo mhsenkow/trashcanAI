@@ -3,6 +3,8 @@
 import clsx from "clsx";
 import { type ViewPreset } from "@/lib/viewPresets";
 import { useViewStore } from "@/lib/viewStore";
+import { useUiStore } from "@/lib/uiStore";
+import { useParamStore } from "@/lib/store";
 
 function ViewIcon({ preset, className }: { preset: ViewPreset; className?: string }) {
   const s = "currentColor";
@@ -101,10 +103,36 @@ function Cell({
   );
 }
 
-/**
- * Single view-cube widget — orthographic presets in one place (no duplicate toolbar).
- * Layout mirrors a CAD view cube: faces around iso, frame in the corner.
- */
+function PreviewBtn({
+  label,
+  active,
+  onClick,
+  disabled,
+}: {
+  label: string;
+  active: boolean;
+  onClick: () => void;
+  disabled?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      disabled={disabled}
+      onClick={onClick}
+      aria-pressed={active}
+      className={clsx(
+        "w-full rounded-md border px-2 py-1 text-left text-[9px] transition",
+        disabled && "opacity-40 cursor-not-allowed",
+        active
+          ? "border-[var(--accent)]/60 bg-[var(--accent)]/15 text-white"
+          : "border-white/8 bg-black/40 text-zinc-400 hover:border-white/20 hover:text-zinc-100",
+      )}
+    >
+      {label}
+    </button>
+  );
+}
+
 export function ViewCube() {
   const activePreset = useViewStore((s) => s.activePreset);
   const setView = useViewStore((s) => s.setView);
@@ -136,6 +164,60 @@ export function ViewCube() {
         </div>
         <Cell label="Frame" active={false} onClick={() => reframe()} className="h-10" />
       </div>
+    </div>
+  );
+}
+
+export function ViewPreviewToggles() {
+  const overhangHeatmap = useViewStore((s) => s.overhangHeatmap);
+  const lidInPlace = useViewStore((s) => s.lidInPlace);
+  const toggleOverhangHeatmap = useViewStore((s) => s.toggleOverhangHeatmap);
+  const toggleLidInPlace = useViewStore((s) => s.toggleLidInPlace);
+  const includeLid = useParamStore((s) => s.includeLid);
+
+  const layerStepPreview = useUiStore((s) => s.layerStepPreview);
+  const clipEnabled = useUiStore((s) => s.clipEnabled);
+  const clipHeight = useUiStore((s) => s.clipHeight);
+  const wallHeatmap = useUiStore((s) => s.wallHeatmap);
+  const autoOrbit = useUiStore((s) => s.autoOrbit);
+  const materialPreview = useUiStore((s) => s.materialPreview);
+  const lidAnimate = useUiStore((s) => s.lidAnimate);
+  const toggleWallHeatmap = useUiStore((s) => s.toggleWallHeatmap);
+  const toggleLayerStepPreview = useUiStore((s) => s.toggleLayerStepPreview);
+  const toggleClip = useUiStore((s) => s.toggleClip);
+  const setClipHeight = useUiStore((s) => s.setClipHeight);
+  const toggleMaterialPreview = useUiStore((s) => s.toggleMaterialPreview);
+  const toggleShowDimensions = useUiStore((s) => s.toggleShowDimensions);
+  const toggleAutoOrbit = useUiStore((s) => s.toggleAutoOrbit);
+  const toggleLidAnimate = useUiStore((s) => s.toggleLidAnimate);
+  const showDimensions = useUiStore((s) => s.showDimensions);
+
+  return (
+    <div className="pointer-events-auto rounded-lg bg-black/45 backdrop-blur p-2 border border-white/5 w-[148px] space-y-1 max-h-[50vh] overflow-y-auto">
+      <p className="px-0.5 pb-1 text-[9px] font-mono uppercase tracking-wider text-zinc-500">
+        Preview
+      </p>
+      <PreviewBtn label="Overhang heatmap" active={overhangHeatmap} onClick={toggleOverhangHeatmap} />
+      <PreviewBtn label="Wall thickness" active={wallHeatmap} onClick={toggleWallHeatmap} />
+      <PreviewBtn label="Layer stepping" active={layerStepPreview} onClick={toggleLayerStepPreview} />
+      <PreviewBtn label="Section clip" active={clipEnabled} onClick={toggleClip} />
+      {clipEnabled && (
+        <input
+          type="range"
+          min={0}
+          max={1}
+          step={0.01}
+          value={clipHeight}
+          onChange={(e) => setClipHeight(parseFloat(e.target.value))}
+          className="w-full accent-[var(--accent)]"
+          aria-label="Clip plane height"
+        />
+      )}
+      <PreviewBtn label="Filament color" active={materialPreview} onClick={toggleMaterialPreview} />
+      <PreviewBtn label="BBox dimensions" active={showDimensions} onClick={toggleShowDimensions} />
+      <PreviewBtn label="Turntable" active={autoOrbit} onClick={toggleAutoOrbit} />
+      <PreviewBtn label="Lid seated" active={lidInPlace} onClick={toggleLidInPlace} disabled={!includeLid} />
+      <PreviewBtn label="Lid press anim" active={lidAnimate} onClick={toggleLidAnimate} disabled={!includeLid} />
     </div>
   );
 }

@@ -218,10 +218,11 @@ export function surfacingFieldValue(type: SurfacingType, a: FieldArgs): number {
       return Math.pow(crest, exp);
     }
     case "knurling": {
+      const ku = tri(a.u + a.v);
+      const kv = tri(a.u - a.v);
+      if (a.sharpness <= 0.01) return ku * kv;
       const exp = 0.35 + 1.15 * a.sharpness;
-      const ku = Math.pow(tri(a.u + a.v), exp);
-      const kv = Math.pow(tri(a.u - a.v), exp);
-      return ku * kv;
+      return Math.pow(ku, exp) * Math.pow(kv, exp);
     }
     case "noise": {
       const n = a.fbm(a.x / a.pitch, a.y / a.pitch, a.z / a.pitch);
@@ -234,18 +235,29 @@ export function surfacingFieldValue(type: SurfacingType, a: FieldArgs): number {
       return clamp01(0.5 + 0.5 * n);
     }
     case "hex": {
+      const a1 = Math.cos(TWO_PI * a.u);
+      const a2 = Math.cos(TWO_PI * (0.5 * a.u + SQRT3_2 * a.v));
+      const a3 = Math.cos(TWO_PI * (0.5 * a.u - SQRT3_2 * a.v));
+      const honey = (a1 + a2 + a3 + 1.5) / 4.5;
+      if (a.sharpness <= 0.01) return honey;
       const d = hexCellCenterDist(a.u, a.v);
       const cellR = 0.26 + 0.1 * (1 - a.sharpness);
-      const t = clamp01(1 - d / cellR);
+      const nubs = clamp01(1 - d / cellR);
       const exp = 0.18 + 0.82 * a.sharpness;
-      return Math.pow(t, exp);
+      const discrete = Math.pow(nubs, exp);
+      const mix = Math.min(1, a.sharpness * 1.4);
+      return honey * (1 - mix) + discrete * mix;
     }
     case "cells": {
       const { f1 } = worleyF1F2(a.u, a.v, a.periodU, a.hash2);
+      const simple = Math.max(0, 1 - f1);
+      if (a.sharpness <= 0.35) return simple;
       const pebbleR = 0.2 + 0.12 * (1 - a.sharpness);
       const core = clamp01(1 - f1 / pebbleR);
       const exp = 0.15 + 0.85 * a.sharpness;
-      return Math.pow(core, exp);
+      const domed = Math.pow(core, exp);
+      const mix = (a.sharpness - 0.35) / 0.65;
+      return simple * (1 - mix) + domed * mix;
     }
     case "waves": {
       const flow = 0.55 * Math.sin(TWO_PI * a.v * 0.22);

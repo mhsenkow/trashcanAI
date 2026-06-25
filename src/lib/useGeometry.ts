@@ -5,6 +5,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { paramsEqual, selectParams, useParamStore } from "./store";
+import { usePrinterStore } from "./printStore";
 import type { GeneratedGeometry, ReceptacleParams } from "./types";
 import type {
   WorkerRequest,
@@ -135,7 +136,10 @@ export function useGeometry(): GeometryState {
         const wasm = await getManifold();
         if (disposed || id !== latestPreviewId.current) return;
 
-        const geometry = generate(wasm, params, { quality: "preview" });
+        const geometry = generate(wasm, params, {
+          quality: "preview",
+          layerHeight: usePrinterStore.getState().layerHeight,
+        });
         if (disposed || id !== latestPreviewId.current) return;
 
         applyPreview(geometry, params);
@@ -178,7 +182,10 @@ export function useGeometry(): GeometryState {
           import("./geometry/manifoldModule"),
         ]);
         const wasm = await getManifold();
-        const geometry = generate(wasm, params, { quality: "full" });
+        const geometry = generate(wasm, params, {
+          quality: "full",
+          layerHeight: usePrinterStore.getState().layerHeight,
+        });
         if (disposed || id !== latestFullId.current) return;
         finishExport(geometry, params, id);
       } catch (e) {

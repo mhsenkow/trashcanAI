@@ -53,6 +53,11 @@ export interface WarpContext {
   topEdgeZ?: number;
   /** True when a brim is present: cove outward into it. False: round the rim inward. */
   topEdgeBrim?: boolean;
+  /** Extra inward cut at the floor ring to offset first-layer elephant foot (mm). */
+  footRelief?: number;
+  chamferAngle?: number;
+  baseEdgeSides?: import("../types").BaseEdgeSides;
+  baseEdgeBias?: number;
 }
 
 export type WarpFn = (verts: Float64Array, count: number) => void;
@@ -92,6 +97,18 @@ export function makeWarp(cfg: SurfacingConfig, ctx: WarpContext): WarpFn {
   const topEdgeZ = ctx.topEdgeZ ?? zMax;
   const topEdgeBrim = ctx.topEdgeBrim ?? false;
   const topBand = topEdgeType !== "none" && topEdgeSize > 0 ? topEdgeSize : 0;
+  const footRelief = ctx.footRelief ?? 0;
+  const chamferAngle = ctx.chamferAngle ?? 45;
+  const baseEdgeSides = ctx.baseEdgeSides ?? "all";
+  const baseEdgeBias = ctx.baseEdgeBias ?? 0;
+
+  const edgeSideMul = (x: number, y: number): number => {
+    if (baseEdgeSides === "long") return Math.abs(x) >= Math.abs(y) ? 0 : 1;
+    if (baseEdgeSides === "short") return Math.abs(y) >= Math.abs(x) ? 0 : 1;
+    return 1;
+  };
+  const edgeBiasMul = (y: number): number =>
+    1 + baseEdgeBias * (y > 0 ? 0.35 : y < 0 ? -0.12 : 0);
 
   const hasSurfacing = type !== "smooth" && amplitude > 0;
   const hasProfile = draftTan !== 0 || edgeBand > 0 || topBand > 0;
@@ -107,19 +124,25 @@ export function makeWarp(cfg: SurfacingConfig, ctx: WarpContext): WarpFn {
     const zFromTop = topEdgeZ - z;
     if (zFromTop < 0 || zFromTop >= topBand) return 0;
     if (roundedRectSdf(x, y, halfL, halfW, r) > 0.6) return 0;
-    const e = edgeRadialInset(zFromTop, topEdgeType, topEdgeSize);
+    const e = edgeRadialInset(zFromTop, topEdgeType, topEdgeSize, chamferAngle);
     return topEdgeBrim ? e : -e;
   };
 
   /** Foot inset/chamfer at the exterior floor ring (zg = 0). */
-  const footRingDr = (): number =>
-    profileRadialOffset(0, baseEdgeType, baseEdgeSize, draftTan);
+  const footRingDr = (x: number, y: number): number => {
+    const mul = edgeSideMul(x, y) * edgeBiasMul(y);
+    return (
+      profileRadialOffset(0, baseEdgeType, baseEdgeSize * mul, draftTan, chamferAngle) -
+      footRelief
+    );
+  };
 
   /** Draft + foot inset + top cove/round on vertical walls. */
   const wallProfileDr = (x: number, y: number, z: number): number => {
     const zg = Math.max(0, z - profileBaseZ);
+    const mul = edgeSideMul(x, y) * edgeBiasMul(y);
     return (
-      profileRadialOffset(zg, baseEdgeType, baseEdgeSize, draftTan) +
+      profileRadialOffset(zg, baseEdgeType, baseEdgeSize * mul, draftTan, chamferAngle) +
       topEdgeDr(x, y, z)
     );
   };
@@ -130,7 +153,7 @@ export function makeWarp(cfg: SurfacingConfig, ctx: WarpContext): WarpFn {
       isExteriorCapRingVertex(x, y, z, halfL, halfW, r, zMin, zMax) &&
       Math.abs(z - zMin) <= 1e-3
     ) {
-      return footRingDr();
+      return footRingDr(x, y);
     }
     if (isVerticalWallVertex(x, y, z, halfL, halfW, r, zMin, zMax)) {
       return wallProfileDr(x, y, z);

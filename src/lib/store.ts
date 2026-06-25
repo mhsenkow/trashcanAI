@@ -14,10 +14,14 @@ interface ParamStore extends ReceptacleParams {
   resetTick: number;
   /** Bumped when any generation param changes (stable dirty-check trigger). */
   paramsVersion: number;
+  undoStack: ReceptacleParams[];
+  redoStack: ReceptacleParams[];
   setParam: <K extends keyof ReceptacleParams>(
     key: K,
     value: ReceptacleParams[K],
   ) => void;
+  undo: () => void;
+  redo: () => void;
   /** Switch finish archetype without touching dimensions, flange, or lid. */
   applySurfacing: (type: SurfacingType) => void;
   loadParams: (params: ReceptacleParams) => void;
@@ -35,8 +39,11 @@ export const useParamStore = create<ParamStore>((set) => ({
   ...DEFAULT_PARAMS,
   resetTick: 0,
   paramsVersion: 0,
+  undoStack: [],
+  redoStack: [],
   setParam: (key, value) =>
     set((state) => {
+      const snapshot = selectParams(state);
       let next = { ...state, [key]: value, paramsVersion: state.paramsVersion + 1 } as ParamStore;
       if (key === "surfacing" && value === "smooth") {
         next.amplitude = 0;
@@ -72,7 +79,37 @@ export const useParamStore = create<ParamStore>((set) => ({
       if (KEY_DIM_KEYS.has(key)) {
         next = { ...next, ...clampParamsToDerived(selectParams(next)) };
       }
-      return next;
+      return {
+        ...next,
+        undoStack: [...state.undoStack, snapshot].slice(-40),
+        redoStack: [],
+      };
+    }),
+  undo: () =>
+    set((state) => {
+      if (!state.undoStack.length) return state;
+      const prev = state.undoStack[state.undoStack.length - 1];
+      const current = selectParams(state);
+      return {
+        ...state,
+        ...prev,
+        undoStack: state.undoStack.slice(0, -1),
+        redoStack: [...state.redoStack, current].slice(-40),
+        paramsVersion: state.paramsVersion + 1,
+      };
+    }),
+  redo: () =>
+    set((state) => {
+      if (!state.redoStack.length) return state;
+      const next = state.redoStack[state.redoStack.length - 1];
+      const current = selectParams(state);
+      return {
+        ...state,
+        ...next,
+        redoStack: state.redoStack.slice(0, -1),
+        undoStack: [...state.undoStack, current].slice(-40),
+        paramsVersion: state.paramsVersion + 1,
+      };
     }),
   applySurfacing: (type) =>
     set((state) => {
@@ -114,6 +151,8 @@ export const useParamStore = create<ParamStore>((set) => ({
       ...DEFAULT_PARAMS,
       resetTick: s.resetTick + 1,
       paramsVersion: s.paramsVersion + 1,
+      undoStack: [],
+      redoStack: [],
     })),
 }));
 
@@ -127,12 +166,37 @@ const PARAM_KEYS: (keyof ReceptacleParams)[] = [
   "wallDraft",
   "baseEdgeType",
   "baseEdgeSize",
+  "decoupleVerticalCorners",
+  "baseEdgeSides",
+  "baseEdgeBias",
+  "chamferAngle",
   "topEdgeType",
   "topEdgeSize",
   "footRing",
   "drainHoles",
   "drainHoleDiameter",
   "interiorFillet",
+  "gasketGroove",
+  "gasketWidth",
+  "gasketDepth",
+  "insertBosses",
+  "insertDiameter",
+  "dividerCols",
+  "dividerRows",
+  "stackLip",
+  "stackLipHeight",
+  "nestTaper",
+  "fingerScoop",
+  "fingerScoopDepth",
+  "handleStyle",
+  "labelSlot",
+  "labelWidth",
+  "labelHeight",
+  "ventSlots",
+  "ventSlotWidth",
+  "wallMount",
+  "gridfinityBase",
+  "splitForBed",
   "flangeWidth",
   "flangeThickness",
   "surfacing",

@@ -27,6 +27,7 @@ export interface SdfSceneState {
   innerEdgeSize: number;
   cavityHalfH: number;
   cavityCenterZ: number;
+  cavityFloorZ: number;
   topHalfL: number;
   topHalfW: number;
   topR: number;
@@ -137,6 +138,7 @@ export function buildSdfState(params: ReceptacleParams): SdfSceneState {
     innerEdgeSize: innerEdge,
     cavityHalfH,
     cavityCenterZ,
+    cavityFloorZ: floorT + 0.35,
     topHalfL,
     topHalfW,
     topR,
